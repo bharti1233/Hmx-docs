@@ -413,8 +413,11 @@ class WordPreservationTest {
                 ),
             ),
         )
+        // Run markers separate the runs in the snapshot description, so the text is
+        // asserted through the document model and the target through the snapshot.
+        val read = WordDocument.read(after).blocks[index] as WordDocument.ParagraphBlock
+        assertEquals("See the updated docs", read.text)
         val block = snapshot(after).blocks[index]
-        assertTrue("edited text is saved, was $block", block.contains("See the updated docs"))
         assertTrue("the link target survives the rewrite, was $block", block.contains("lnk(https://example.com/docs)"))
     }
 
