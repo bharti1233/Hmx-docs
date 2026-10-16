@@ -1,8 +1,8 @@
 # 0001 - HMX Docs licensing and distribution model
 
-- **Status:** OPEN - awaiting the repository owner's decision
+- **Status:** DECIDED - Option A, AGPL-3.0 source-available (owner decision, 2026-10-16)
 - **Date opened:** 2026-10-16
-- **Blocks:** any distribution of HMX Docs builds; Phases 9-10 of the roadmap
+- **Blocks:** nothing further; the remaining items below are Phase 10 work
 - **Does not block:** Phase 1 build/CI work, local or CI compilation, unsigned
   APK artifacts (not distributed), and read-only research
 
@@ -41,7 +41,7 @@ The decision has not been made yet, and this record must not invent it.
 
 ## Options
 
-### Option A - AGPL-3.0-compatible, source-available HMX Docs (recommended)
+### Option A - AGPL-3.0-compatible, source-available HMX Docs (recommended) - **CHOSEN**
 
 Keep the AGPL-3.0 license. Publish the source of the HMX Docs fork. Ship GPL-3.0
 notices for the Qyra bridge and add a third-party notice page. This is the option
@@ -69,18 +69,30 @@ office/docx SDK), and re-planning the roadmap from Phase 0.
 
 ## Decision
 
-*Not decided.* The repository owner must choose A or B, ideally with legal review
-before any public distribution. Until then:
+**Option A was chosen by the repository owner on 2026-10-16.** HMX Docs stays
+AGPL-3.0 and source-available. The plan this implies:
 
-- Phase 1 may continue: building in CI and storing artifacts is not distribution.
-- No public release, no store listing, and no claim of legal clearance may be made.
+- Publish the HMX Docs source; keep every existing copyright and licence notice,
+  and state what changed relative to upstream Kern.
+- Ship the Qyra GPL-3.0 notice and offer its corresponding source, with the build
+  route documented (the pinned commit in
+  `.github/actions/build-pdf-bridge/action.yml` plus `src/pdf-bridge/README.md`).
+- Add the third-party notice bundle (POI, OpenCSV, jsoup, XMLBeans, commons
+  transitives, Qyra) - Phase 10 work, not a Phase 1 blocker.
+- Monetisation cannot rely on keeping the code closed. No network component is
+  planned, so AGPL §13 stays theoretical.
+- Play's `MANAGE_EXTERNAL_STORAGE` declaration is a separate policy question; the
+  `ScopedStorage` lint warning is the standing reminder.
 
-## Consequences of not deciding
+This is a decision, not legal clearance: a qualified lawyer should still review
+before the first public distribution.
 
-Phase 1 does not depend on this. Phases 9 and 10 (hardening, productization,
-release candidate) do: the notice bundle, About screen and Play declarations all
-derive from it. Deciding late means rework, not a dead end - except in Option B,
-where the rework is the whole project.
+## Consequences of this decision
+
+Phase 1 never depended on it. Phases 9 and 10 now have a stable answer: the
+notice bundle, About screen and store declarations all follow Option A, and the
+roadmap's "conditional GO" condition (a) is satisfied. Had Option B been chosen,
+the rework would have been the entire project.
 
 ## Not legal advice
 

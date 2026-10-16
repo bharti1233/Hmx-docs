@@ -96,21 +96,20 @@ The warnings below are the residue; none of them fails a job.
   `ObsoleteSdkInt`, `UseOfNonLambdaOffsetOverload`. Bumping dependencies is
   deliberately not part of a build/CI change; it belongs with the code work that
   can re-test them.
-- `ScopedStorage` is worth reading: Play limits `MANAGE_EXTERNAL_STORAGE`. That is
-  a distribution decision, tracked in
-  [decisions/0001](decisions/0001-licensing-and-distribution.md).
+- `ScopedStorage` is worth reading: Play limits `MANAGE_EXTERNAL_STORAGE`. The
+  licence question behind it is settled in
+  [decisions/0001](decisions/0001-licensing-and-distribution.md); the Play
+  declaration itself is Phase 10 work.
 - **Node 20 deprecation notices** for `actions/checkout@v4`,
   `actions/upload-artifact@v4` and `gradle/actions/setup-gradle@v4`: those tags
   target Node 20 and the runner forces Node 24. They still work. `setup-java` was
   the only one *explicitly* deprecated ("will no longer receive updates"), so it
   was moved to `@v6`; its inputs used here (`distribution`, `java-version`) did not
   change.
-- **`gradle/actions` v6 is deliberately not adopted yet.** From v6 the caching
-  component is no longer open source and upgrading means accepting Gradle's Terms
-  of Use for it. For an AGPL-3.0, no-telemetry project that is the owner's
-  decision, not a build fix - see
-  [decisions/0001](decisions/0001-licensing-and-distribution.md). Staying on `@v4`
-  costs a deprecation notice and nothing else.
+- **`gradle/actions` stays on v4 by decision.** From v6 the caching component is no
+  longer open source and upgrading means accepting Gradle's Terms of Use for it.
+  The owner was asked on 2026-10-16 and chose to keep the CI fully open source and
+  send nothing to a third party. Cost: the Node 20 notice remains.
 - `release.yml` still publishes a **debug-signed** APK on tags. Publishing an
   unsigned release APK is not possible (it cannot be installed); a signed release
   needs a keystore in repository secrets and was explicitly out of scope.

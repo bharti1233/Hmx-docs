@@ -35,7 +35,9 @@ Kern is in early alpha.
 > **This repository is the HMX Docs working copy.** It is the upstream Kern source
 > at tag `0.1.11.0` (AGPL-3.0, © Sricharan Suresh) with Phase 1 build/CI work on
 > top. The app itself is still branded and named Kern; product renaming is a later
-> phase. See [docs/hmx-docs-audit-and-roadmap.md](docs/hmx-docs-audit-and-roadmap.md).
+> phase. HMX Docs stays AGPL-3.0 and source-available - see
+> [docs/decisions/0001](docs/decisions/0001-licensing-and-distribution.md) - and the
+> roadmap is in [docs/hmx-docs-audit-and-roadmap.md](docs/hmx-docs-audit-and-roadmap.md).
 
 ## What Kern does
 
