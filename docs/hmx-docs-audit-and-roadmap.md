@@ -2,6 +2,8 @@
 
 **Scope note.** Everything below was gathered read-only from `/mnt/sdcard/AIProjects/kern-main` plus read-only queries to the upstream GitHub API and to Apache POI 5.5.1 sources (to verify library behaviour the code depends on). No project file was created, edited, moved, or deleted. No build, test, lint, or APK task was run — a scratch build in `/tmp` was started and then aborted on instruction; the scratch copy was deleted and no build process remains. No device or emulator verification was performed. Claims below are marked **[verified-code]** (read from this repository's source), **[verified-upstream]** (from the upstream repo's history/CI via API, or from POI's published source), **[inference]**, or **[unknown]**.
 
+*Phase 1 note:* the audit was written against a snapshot with no `.git`, and a few statements describe that snapshot (for example "the local directory is not a git checkout"). That snapshot is now the first commit of this repository; those statements are history, not current state. Nothing else in this document has been revised.
+
 ---
 
 ## 1. Executive Summary

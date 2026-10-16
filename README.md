@@ -109,15 +109,16 @@ committed Gradle wrapper, checksum-verified in
 # Android Lint (config/lint.xml treats any network API use as an error)
 ./gradlew lintDebug
 
-# Debug APK -> build/outputs/apk/debug/kern-debug.apk
+# Debug APK -> build/outputs/apk/debug/Kern-debug.apk
 ./gradlew assembleDebug
 
-# Release APK, R8 + resource shrinking -> build/outputs/apk/release/*-unsigned.apk
+# Release APK, R8 + resource shrinking -> build/outputs/apk/release/Kern-release-unsigned.apk
 ./gradlew assembleRelease
 ```
 
-Nothing needs to be installed by hand: the wrapper downloads its own Gradle, and
-the Android SDK/platform packages are resolved from the versions above.
+You need a JDK 17 and an Android SDK (platform 35, build-tools 35.0.0) on the
+machine doing the build; Gradle itself is downloaded by the wrapper, so it never
+has to be installed by hand. CI has all of that already.
 
 **The PDF bridge is optional for a build.** `assembleDebug` only ships working PDF
 merge/split tools if `jniLibs/<abi>/libkern_pdf.so` exists; without it those tools
@@ -129,7 +130,7 @@ pinned Qyra commit - see [src/pdf-bridge/README.md](src/pdf-bridge/README.md).
 | | Debug | Release |
 |---|---|---|
 | Task | `assembleDebug` | `assembleRelease` |
-| File | `kern-debug.apk` | `app-release-unsigned.apk` |
+| File | `Kern-debug.apk` | `Kern-release-unsigned.apk` |
 | Signed | yes, auto-generated debug key | **no - unsigned** |
 | R8 / shrinking | off | on (mapping in `build/outputs/mapping/release/`) |
 
