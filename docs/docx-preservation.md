@@ -170,8 +170,23 @@ environment `[inference]`.
   device (only the android-36 platform installed, no `local.properties`, `ANDROID_HOME`
   unset, no POI in the Gradle cache, ~515 MB free RAM), so CI is the verification
   channel.
-- Results: **pending the first CI run of this branch** — test count, lint counts, run
-  URL and APK hash are added here once observed.
+- Results — **observed**, all green:
+  - [Android CI 38938323087](https://github.com/bharti1233/Hmx-docs/actions/runs/38938323087)
+    and [Release build check 38938323128](https://github.com/bharti1233/Hmx-docs/actions/runs/38938323128)
+    for commit `e239ca2`:
+    - unit tests **71 tests, 0 failed, 1 skipped** in 10 suites (Phase 1 baseline: 37 tests,
+      8 suites). The skipped test is the `@Ignore` probe from §2 row 9.
+    - lint **0 errors, 49 warnings** — identical to the Phase 1 baseline, so this change
+      adds none.
+    - `Kern-debug.apk` sha256 `9d015ec3deb40f23fe739c8983603c530206db3a9c6a97834888ad1d6b3a9aee`.
+    - `Kern-release-unsigned.apk` sha256 `a154f4e4b74694f3693de92ab4eed9af20c59ddb26213ca454c3821a48449221`;
+      the job proves it is unsigned by requiring `apksigner` to **reject** it, and R8 ran.
+  - The first run of this change ([38935275639](https://github.com/bharti1233/Hmx-docs/actions/runs/38935275639))
+    failed on two assertions, both test-side (a fixture that replaced a whole paragraph
+    without carrying the link URL, and a fake writer that truncated during its rollback);
+    fixed in `2187156` and `e239ca2`, with no product-code change.
+- What CI cannot prove: device behaviour (the checklist in §8), a real provider's grant
+  lifetime and write semantics, and the crash window between write and commit.
 
 ## 8. Manual device test plan
 

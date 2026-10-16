@@ -382,6 +382,18 @@ Effort notes: day ranges are **engineering days of focused work** for the stated
 
 **Current state:** 11 Word unit tests on generated fixtures; they assert re-read model equality, never XML preservation; no fixture for images, merges, hyperlinks+save, fields, notes, track changes, real-world docs.
 
+**Shipped early (2026-10-16, `e239ca2`):** `docs/docx-preservation.md` holds the measured
+preservation behaviour, the data-loss classification and the manual device plan;
+`tests/editors/word/WordPreservationTest.kt` (21 tests over nine generated fixtures,
+semantic snapshots, one `@Ignore`d probe for the documented run-property loss) and
+`tests/shared/DocumentIoTest.kt` (13 tests) run in CI; the document-access defect is
+fixed (`docs/decisions/0002-persistable-uri-access.md`). Phase 3 work packages 3 and 4
+(block↔element index mapping, table column deletion) shipped with regression tests; the
+rest of Phase 3 (draft/journal, crash-injection test, error taxonomy) has not.
+Still open from the work packages below: hand-authored XML fixtures (cases 8–12), the
+JVM performance harness, notes/track-changes/comment probes and the machine-readable
+baseline report.
+
 **Work packages:**
 1. Build fixture generators (case 1–7, 14–15) as JVM tests; hand-author XML fixtures (8–12) under `tests/fixtures/docx/`.
 2. Implement the canonicalizer + structural differ (§7.2 items 1–2) as a small test utility.
