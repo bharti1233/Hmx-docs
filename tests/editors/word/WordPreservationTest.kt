@@ -398,9 +398,20 @@ class WordPreservationTest {
     fun editLinkedParagraph_keepsItsHyperlinkTarget() {
         val bytes = withHyperlink()
         val index = blockIndex(bytes, "See the docs")
+        // The rich-text field keeps the target as a string annotation on the linked range,
+        // so an edited linked run still carries its URL (WordRichText.toRuns). A caller that
+        // builds runs without one is asking for the link to be dropped.
         val after = WordDocument.applyEditsAndSerialize(
             bytes,
-            mapOf(index to listOf(WordDocument.Run("See the updated docs"))),
+            mapOf(
+                index to listOf(
+                    WordDocument.Run("See "),
+                    WordDocument.Run(
+                        "the updated docs",
+                        WordDocument.RunStyle(linkUrl = "https://example.com/docs"),
+                    ),
+                ),
+            ),
         )
         val block = snapshot(after).blocks[index]
         assertTrue("edited text is saved, was $block", block.contains("See the updated docs"))

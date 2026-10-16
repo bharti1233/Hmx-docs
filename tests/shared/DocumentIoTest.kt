@@ -94,7 +94,9 @@ class DocumentIoTest {
         try {
             DocumentIo.writeGuarded(REPLACEMENT, PREVIOUS) { written ->
                 attempt++
-                content = written.copyOf(3) // a write that dies part-way through
+                // The first write dies part-way through; the rollback (second write) is
+                // what has to put the original content back intact.
+                content = if (attempt == 1) written.copyOf(3) else written
                 if (attempt == 1) throw IOException("provider went away")
             }
             fail("a failed write must reach the caller")
