@@ -28,24 +28,36 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      # No gradle-wrapper.jar is committed, so provision Gradle directly.
-      - name: Set up Gradle
+      # Caching only. The Gradle version comes from the committed wrapper
+      # (gradle/wrapper/gradle-wrapper.properties, pinned by sha256), so CI runs
+      # the same Gradle a clean checkout gets locally.
+      - name: Set up Gradle (wrapper cache)
         uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '8.10.2'
 
       # Cross-compiles the native PDF bridge so the debug artifact has working PDF tools.
       - name: Build PDF native bridge
         uses: ./.github/actions/build-pdf-bridge
 
       - name: Build debug APK
-        run: gradle assembleDebug --no-daemon --stacktrace
+        run: ./gradlew assembleDebug --no-daemon --stacktrace
+
+      - name: Record APK checksum
+        run: |
+          cd build/outputs/apk/debug
+          sha256sum *.apk | tee SHA256SUMS.txt
+          {
+            echo "### Debug APK"
+            ls -l *.apk
+            cat SHA256SUMS.txt
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: kern-debug-apk
-          path: build/outputs/apk/debug/*.apk
+          name: kern-debug-apk-${{ github.sha }}
+          path: |
+            build/outputs/apk/debug/*.apk
+            build/outputs/apk/debug/SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 30
 
@@ -62,22 +74,21 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      # No gradle-wrapper.jar is committed, so provision Gradle directly.
-      - name: Set up Gradle
+      - name: Set up Gradle (wrapper cache)
         uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '8.10.2'
 
       # tests/editors and tests/shared are plain JVM tests, so the native PDF
       # bridge is deliberately not built here - it would only slow the job down.
       - name: Run JVM unit tests
-        run: gradle testDebugUnitTest --no-daemon --stacktrace
+        run: ./gradlew testDebugUnitTest --no-daemon --stacktrace
 
+      # Uploaded on success too, so the passing test counts are part of the
+      # evidence a run leaves behind, not just the failures.
       - name: Upload unit test report
-        if: failure()
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
-          name: kern-unit-test-report
+          name: kern-unit-test-report-${{ github.sha }}
           path: |
             build/reports/tests/testDebugUnitTest
             build/test-results/testDebugUnitTest
@@ -97,23 +108,21 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      # No gradle-wrapper.jar is committed, so provision Gradle directly.
-      - name: Set up Gradle
+      - name: Set up Gradle (wrapper cache)
         uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '8.10.2'
 
       # Applies config/lint.xml, which treats any network API use as an error.
       - name: Run Android Lint
-        run: gradle lintDebug --no-daemon --stacktrace
+        run: ./gradlew lintDebug --no-daemon --stacktrace
 
       - name: Upload lint report
-        if: failure()
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
-          name: kern-lint-report
+          name: kern-lint-report-${{ github.sha }}
           path: |
             build/reports/lint-results-debug.html
             build/reports/lint-results-debug.xml
+            build/reports/lint-results-debug.txt
           if-no-files-found: warn
           retention-days: 14

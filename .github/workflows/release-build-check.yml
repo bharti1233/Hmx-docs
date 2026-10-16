@@ -28,11 +28,8 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      # No gradle-wrapper.jar is committed, so provision Gradle directly.
-      - name: Set up Gradle
+      - name: Set up Gradle (wrapper cache)
         uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '8.10.2'
 
       # The native PDF bridge is deliberately not built here. R8 and resource
       # shrinking operate on JVM bytecode and res/, never on jniLibs/*.so, so
@@ -42,10 +39,12 @@ jobs:
       # assembleRelease is the only task that runs R8: isMinifyEnabled +
       # isShrinkResources + proguard-rules.pro. Apache POI and OpenCSV are
       # reflection-heavy, so this is where their keep rules are actually proven.
-      # The APK produced here is unsigned (no signingConfig exists yet) and is
-      # never published - it exists only to show the release config builds.
+      #
+      # The APK produced here is UNSIGNED: no signingConfig exists in
+      # build.gradle.kts and no keystore is configured, so AGP emits
+      # app-release-unsigned.apk. See the verification step below.
       - name: Build release APK (unsigned)
-        run: gradle assembleRelease --no-daemon --stacktrace
+        run: ./gradlew assembleRelease --no-daemon --stacktrace
 
       # Guards against the check silently becoming a no-op: without minification
       # R8 emits no mapping.txt, so its absence means nothing was exercised.
@@ -58,6 +57,60 @@ jobs:
           echo "R8 outputs:"
           ls -l build/outputs/mapping/release/
 
+      # Proves the artifact is unsigned instead of trusting the filename.
+      # Two independent checks: no JAR (v1) signature entries in the archive, and
+      # apksigner refuses to verify it (it also rejects v2/v3/v4-only signatures).
+      - name: Verify the release APK is unsigned
+        run: |
+          set -uo pipefail
+          apk=$(ls build/outputs/apk/release/*.apk | head -1)
+          if [ -z "$apk" ] || [ ! -f "$apk" ]; then
+            echo "::error title=No release APK::assembleRelease produced no APK to verify."
+            exit 1
+          fi
+          echo "Verifying: $apk"
+
+          if unzip -l "$apk" | grep -qE 'META-INF/.*\.(RSA|DSA|EC|SF)$'; then
+            echo "::error title=Release APK is signed::JAR signature entries (META-INF/*.RSA|*.DSA|*.EC|*.SF) are present in $apk."
+            exit 1
+          fi
+          echo "OK: no JAR signature entries."
+
+          apksigner=$(find "${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}/build-tools" -name apksigner -type f 2>/dev/null | sort -V | tail -1)
+          if [ -z "$apksigner" ]; then
+            echo "::error title=apksigner missing::Could not find apksigner under build-tools; cannot prove the APK is unsigned."
+            exit 1
+          fi
+          echo "Using: $apksigner"
+          if "$apksigner" verify --verbose --print-certs "$apk"; then
+            echo "::error title=Release APK is signed::apksigner verified $apk, so it is not an unsigned build."
+            exit 1
+          fi
+          echo "OK: apksigner rejects the APK (no valid signature), as expected for an unsigned build."
+
+          size=$(stat -c%s "$apk")
+          sum=$(sha256sum "$apk" | cut -d' ' -f1)
+          ( cd build/outputs/apk/release && sha256sum *.apk > SHA256SUMS.txt )
+          {
+            echo "### Unsigned release APK verified"
+            echo
+            echo "- file: \`$(basename "$apk")\`"
+            echo "- size: ${size} bytes"
+            echo "- sha256: \`${sum}\`"
+            echo "- no JAR signature entries; \`apksigner verify\` failed as expected"
+          } >> "$GITHUB_STEP_SUMMARY"
+          cat build/outputs/apk/release/SHA256SUMS.txt
+
+      - name: Upload unsigned release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: kern-release-unsigned-apk-${{ github.sha }}
+          path: |
+            build/outputs/apk/release/*.apk
+            build/outputs/apk/release/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
+
       # mapping.txt de-obfuscates release stack traces; usage.txt and seeds.txt
       # record exactly what R8 stripped and kept, which is how POI/OpenCSV shrink
       # breakage gets diagnosed. Uploaded on failure too, when they matter most.
@@ -65,7 +118,7 @@ jobs:
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
-          name: kern-release-r8-reports
+          name: kern-release-r8-reports-${{ github.sha }}
           path: build/outputs/mapping/release/
           if-no-files-found: warn
           retention-days: 30

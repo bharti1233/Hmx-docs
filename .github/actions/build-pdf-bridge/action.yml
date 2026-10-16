@@ -9,8 +9,13 @@ inputs:
     description: Qyra fork repository (owner/name) that holds kern-bridge.
     default: verycareful/Qyra
   qyra-ref:
-    description: Git ref (branch/tag/sha) of the fork to build from.
-    default: main
+    description: >
+      Git ref (commit sha, tag or branch) of the fork to build from. Defaults to
+      the reviewed kern-bridge commit; override only after reviewing the diff.
+    # Pinned on purpose: this compiles foreign source into the shipped APK, so the
+    # default is a reviewed commit, not the fork's moving `main`.
+    # 397a10fd is "feat(android): add kern-bridge JNI crate for Kern (dev.kern)".
+    default: 397a10fd155f4503876e7048542699d0248f99b8
   abis:
     description: Space-separated cargo-ndk ABIs to build.
     default: arm64-v8a armeabi-v7a x86_64
@@ -32,14 +37,24 @@ runs:
       shell: bash
       run: echo "ANDROID_NDK_HOME=${ANDROID_NDK_LATEST_HOME:-$ANDROID_NDK_ROOT}" >> "$GITHUB_ENV"
 
+    # `git clone --branch` only accepts branch/tag names, so the ref is fetched
+    # explicitly: a commit sha, a tag or a branch all work, and the resolved
+    # commit is printed so the log records exactly which source was compiled.
     - name: Fetch kern-bridge from the Qyra fork (sparse)
       shell: bash
+      env:
+        QYRA_REPO: ${{ inputs.qyra-repo }}
+        QYRA_REF: ${{ inputs.qyra-ref }}
       run: |
-        git clone --depth 1 --branch "${{ inputs.qyra-ref }}" --sparse \
-          "https://github.com/${{ inputs.qyra-repo }}.git" qyra-fork
+        git init -q qyra-fork
         cd qyra-fork
+        git remote add origin "https://github.com/${QYRA_REPO}.git"
+        git sparse-checkout init --cone
         git sparse-checkout set kern-bridge
-        test -f kern-bridge/Cargo.toml || { echo "kern-bridge not found in ${{ inputs.qyra-repo }}@${{ inputs.qyra-ref }}"; exit 1; }
+        git fetch --depth 1 origin "${QYRA_REF}"
+        git checkout -q FETCH_HEAD
+        echo "kern-bridge source: ${QYRA_REPO}@$(git rev-parse HEAD)"
+        test -f kern-bridge/Cargo.toml || { echo "kern-bridge not found in ${QYRA_REPO}@${QYRA_REF}"; exit 1; }
 
     - name: Build libkern_pdf.so for each ABI
       shell: bash
