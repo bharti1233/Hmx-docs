@@ -25,7 +25,7 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
 
         // If launched via "Open with", jump straight to the right editor.
-        val deepLink = IntentHandler.resolve(intent)
+        val deepLink = IntentHandler.resolve(intent, this)
         val settings = KernSettings.create(applicationContext)
 
         setContent {

@@ -3,6 +3,7 @@ package dev.kern.editors.word
 import org.apache.poi.xwpf.usermodel.ParagraphAlignment
 import org.apache.poi.xwpf.usermodel.UnderlinePatterns
 import org.apache.poi.xwpf.usermodel.XWPFDocument
+import org.apache.poi.xwpf.usermodel.XWPFFieldRun
 import org.apache.poi.xwpf.usermodel.XWPFHyperlinkRun
 import org.apache.poi.xwpf.usermodel.XWPFParagraph
 import org.apache.poi.xwpf.usermodel.XWPFRun
@@ -19,9 +20,15 @@ import java.math.BigInteger
  * so block indices remain stable across all editing operations.
  *
  * Non-destructive round-trip guarantee:
+ * - A block index maps back to the exact body element it was read from (see [Parsed]).
  * - Only edited paragraphs' runs and modified paragraph properties are rewritten.
  * - Only edited tables are modified (updating cells or structural rows/cols).
- * - Untouched paragraphs, tables, images, headers, footers, and styles survive byte-for-byte.
+ * - Run content the run model cannot express (pictures, fields, footnote/endnote
+ *   references, comment marks, anchored links) is kept in place instead of being
+ *   rebuilt, so editing a caption never deletes the picture or field beside it.
+ * - Hyperlink runs are rewritten as hyperlink runs, keeping their target URL.
+ * - Untouched paragraphs, tables, images, headers, footers and styles survive the
+ *   round trip. POI re-serializes the package, so the ZIP bytes themselves differ.
  */
 object WordDocument {
 
@@ -97,32 +104,54 @@ object WordDocument {
     /** Passthrough for unmodeled XML structures. Never rewritten. */
     data object OpaqueBlock : Block
 
-    /** Parsed document representation. */
-    data class Parsed(val blocks: List<Block>)
+    /** Block with no body element behind it: the placeholder block of an empty document. */
+    private const val UNMAPPED = -1
+
+    /** Parsed document representation.
+     *
+     * [elementIndices] maps each block back to the index of the body element it was read
+     * from — an image block points at the paragraph that holds the picture — so an edit
+     * made against a block index is applied to the element that produced that block.
+     * Without the mapping, any paragraph carrying an image shifts every later block onto
+     * the wrong body element.
+     */
+    data class Parsed(val blocks: List<Block>, val elementIndices: List<Int>)
 
     fun read(bytes: ByteArray): Parsed {
         XWPFDocument(ByteArrayInputStream(bytes)).use { doc ->
             val blocks = ArrayList<Block>()
-            for (element in doc.bodyElements) {
+            val elementIndices = ArrayList<Int>()
+            doc.bodyElements.forEachIndexed { elementIndex, element ->
                 when (element) {
                     is XWPFParagraph -> {
                         val images = extractPictures(element)
-                        if (images.isNotEmpty()) {
-                            images.forEach { blocks.add(it) }
+                        images.forEach {
+                            blocks.add(it)
+                            elementIndices.add(elementIndex)
                         }
-                        val para = readParagraph(element)
+                        val para = readParagraph(element, doc)
+                        // A paragraph that only carries pictures has no text to edit, so it
+                        // does not get an editable block of its own.
                         if (para.text.isNotEmpty() || images.isEmpty()) {
                             blocks.add(para)
+                            elementIndices.add(elementIndex)
                         }
                     }
-                    is XWPFTable -> blocks.add(readTable(element))
-                    else -> blocks.add(OpaqueBlock)
+                    is XWPFTable -> {
+                        blocks.add(readTable(element))
+                        elementIndices.add(elementIndex)
+                    }
+                    else -> {
+                        blocks.add(OpaqueBlock)
+                        elementIndices.add(elementIndex)
+                    }
                 }
             }
             if (blocks.isEmpty()) {
                 blocks.add(ParagraphBlock(ParaProps(), listOf(Run("")), editable = true))
+                elementIndices.add(UNMAPPED)
             }
-            return Parsed(blocks)
+            return Parsed(blocks, elementIndices)
         }
     }
 
@@ -135,13 +164,19 @@ object WordDocument {
         paraProps: Map<Int, ParaPropsUpdate> = emptyMap(),
         tableEdits: Map<Int, List<List<String>>> = emptyMap(),
     ): ByteArray {
+        // Resolve every block index through the layout read() produced: pictures and
+        // unmodelled elements add or reorder blocks, so a block index is not a body index.
+        val elementIndices = read(originalBytes).elementIndices
         XWPFDocument(ByteArrayInputStream(originalBytes)).use { doc ->
             val elements = doc.bodyElements
 
             // Apply paragraph run edits and property changes
             val allParaIndices = (edits.keys + paraProps.keys).distinct()
             for (index in allParaIndices) {
-                val paragraph = elements.getOrNull(index) as? XWPFParagraph ?: continue
+                val elementIndex = elementIndices.getOrNull(index)
+                    ?: throw IllegalStateException("Paragraph block $index does not exist in this document")
+                val paragraph = elements.getOrNull(elementIndex) as? XWPFParagraph
+                    ?: throw IllegalStateException("Paragraph block $index does not resolve to a paragraph")
                 
                 // Update runs if modified
                 edits[index]?.let { writeRuns(paragraph, it) }
@@ -179,7 +214,10 @@ object WordDocument {
 
             // Apply table cell and structural edits
             for ((index, newGrid) in tableEdits) {
-                val table = elements.getOrNull(index) as? XWPFTable ?: continue
+                val elementIndex = elementIndices.getOrNull(index)
+                    ?: throw IllegalStateException("Table block $index does not exist in this document")
+                val table = elements.getOrNull(elementIndex) as? XWPFTable
+                    ?: throw IllegalStateException("Table block $index does not resolve to a table")
                 writeTable(table, newGrid)
             }
 
@@ -192,10 +230,13 @@ object WordDocument {
 
     // ---- Read Helpers -------------------------------------------------------
 
-    private fun readParagraph(p: XWPFParagraph): ParagraphBlock {
+    private fun readParagraph(p: XWPFParagraph, doc: XWPFDocument): ParagraphBlock {
         val runs = ArrayList<Run>()
         for (r in p.runs) {
-            val linkUrl = (r as? XWPFHyperlinkRun)?.hyperlinkId
+            // The relationship id is not a URL: resolve the target so a rewrite can re-link.
+            // An internal (bookmark) link resolves to null and is then kept as-is on write.
+            val linkUrl = (r as? XWPFHyperlinkRun)?.getHyperlinkId()
+                ?.let { doc.getHyperlinkByID(it)?.getURL() }
             runs.add(Run(r.text() ?: "", styleOfRun(r, linkUrl)))
         }
         val merged = collapse(runs).ifEmpty { listOf(Run("")) }
@@ -284,17 +325,79 @@ object WordDocument {
 
     // ---- Write Helpers ------------------------------------------------------
 
+    /** Run children the run model can rebuild: run properties and literal text, breaks, tabs. */
+    private val modelledRunChildren = setOf("rPr", "t", "br", "cr", "tab")
+
+    /** Children that carry the run's text, dropped from a run that is kept for its content. */
+    private val textRunChildren = setOf("t", "br", "cr", "tab")
+
+    /**
+     * True when [run] carries element content the run model cannot rebuild: pictures
+     * (inline or floating), simple and complex fields, footnote and endnote references,
+     * comment marks, symbols, or an internal (bookmark) hyperlink. Rewriting such a run
+     * from the model would delete that content, so the run is kept instead.
+     */
+    private fun hasUnmodelledContent(run: XWPFRun): Boolean {
+        if (run is XWPFFieldRun) return true
+        if (run is XWPFHyperlinkRun && run.getHyperlinkId() == null) return true
+        var unmodelled = false
+        run.getCTR().newCursor().use { cursor ->
+            cursor.selectPath("./*")
+            while (!unmodelled && cursor.toNextSelection()) {
+                unmodelled = cursor.name?.localPart !in modelledRunChildren
+            }
+        }
+        return unmodelled
+    }
+
+    /**
+     * Drops the text of a run kept by [hasUnmodelledContent] so the rewritten paragraph
+     * does not show that text twice; every other child (picture, field, reference) stays.
+     */
+    private fun dropTextChildren(run: XWPFRun) {
+        var removed = true
+        while (removed) {
+            removed = false
+            run.getCTR().newCursor().use { cursor ->
+                cursor.selectPath("./*")
+                while (cursor.toNextSelection()) {
+                    if (cursor.name?.localPart in textRunChildren) {
+                        cursor.removeXml()
+                        removed = true
+                        // Mutating invalidates the walk's position, so start it over.
+                        return@use
+                    }
+                }
+            }
+        }
+    }
+
     private fun writeRuns(p: XWPFParagraph, runs: List<Run>) {
-        for (i in p.runs.indices.reversed()) p.removeRun(i)
+        // Keep the runs holding content the model cannot express: rebuilding them would
+        // silently delete the picture, field or footnote reference beside the edited text.
+        val preserved = p.runs.filter(::hasUnmodelledContent)
+        for (i in p.runs.indices.reversed()) {
+            if (p.runs[i] in preserved) continue
+            p.removeRun(i)
+        }
+        preserved.forEach(::dropTextChildren)
+
         val effective = if (runs.isEmpty()) listOf(Run("")) else runs
         for (run in effective) {
-            val r = p.createRun()
+            // A linked run has to be rewritten as a link, or the URL is lost on the next save.
+            val r = run.style.linkUrl?.let { p.createHyperlinkRun(it) } ?: p.createRun()
             applyStyle(r, run.style)
-            val lines = run.text.split("\n")
-            r.setText(lines.first(), 0)
-            for (k in 1 until lines.size) {
-                r.addBreak()
-                r.setText(lines[k])
+            writeRunText(r, run.text)
+        }
+    }
+
+    /** Writes [text] into [r], turning line breaks into breaks and tabs into tab stops. */
+    private fun writeRunText(r: XWPFRun, text: String) {
+        text.split("\n").forEachIndexed { lineIndex, line ->
+            if (lineIndex > 0) r.addBreak()
+            line.split("\t").forEachIndexed { tabIndex, part ->
+                if (tabIndex > 0) r.addTab()
+                r.setText(part)
             }
         }
     }
@@ -313,6 +416,11 @@ object WordDocument {
             val targetColCount = newGrid[r].size
             while (row.tableCells.size < targetColCount) {
                 row.addNewTableCell()
+            }
+            // A column deleted in the editor has to leave the XML too, or the saved table
+            // keeps its old width with a stale cell at the end.
+            while (row.tableCells.size > targetColCount) {
+                row.removeCell(row.tableCells.size - 1)
             }
             for (c in newGrid[r].indices) {
                 val cell = row.getCell(c) ?: continue

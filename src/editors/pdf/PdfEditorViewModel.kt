@@ -71,7 +71,7 @@ class PdfEditorViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             val result = withContext(Dispatchers.IO) {
                 runCatching {
-                    DocumentIo.tryPersist(ctx, decoded)
+                    DocumentIo.persistAccess(ctx, decoded)
                     val name = DocumentIo.displayName(ctx, decoded)
                     val doc = PdfDocument.open(ctx, decoded)
                     name to doc
@@ -83,7 +83,7 @@ class PdfEditorViewModel(app: Application) : AndroidViewModel(app) {
                 pageCount = doc.pageCount
                 loading = false
             }.onFailure {
-                error = it.message ?: "Could not open the PDF."
+                error = DocumentIo.loadError(it, "Could not open the PDF.")
                 loading = false
             }
         }
@@ -102,7 +102,7 @@ class PdfEditorViewModel(app: Application) : AndroidViewModel(app) {
             val result = withContext(Dispatchers.IO) {
                 runCatching { DocumentIo.writeBytes(ctx, target, DocumentIo.readBytes(ctx, source)) }
             }
-            onResult(result.isSuccess, result.exceptionOrNull()?.message)
+            onResult(result.isSuccess, DocumentIo.saveError(result.exceptionOrNull(), "Could not save the document. Use Export to save a copy."))
         }
     }
 
@@ -196,7 +196,7 @@ class PdfEditorViewModel(app: Application) : AndroidViewModel(app) {
                 pendingOutput = null
                 toolMessage = "Saved"
             } else {
-                toolError = "Save failed: ${result.exceptionOrNull()?.message}"
+                toolError = "Save failed: " + DocumentIo.saveError(result.exceptionOrNull(), "The copy could not be saved.")
             }
         }
     }

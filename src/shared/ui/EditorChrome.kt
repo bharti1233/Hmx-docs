@@ -5,6 +5,7 @@ import androidx.activity.compose.LocalOnBackPressedDispatcherOwner
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.AlertDialog
@@ -107,11 +108,18 @@ fun EditorChrome(
         Box(Modifier.fillMaxSize().padding(padding)) {
             when {
                 loading -> CircularProgressIndicator(Modifier.align(Alignment.Center), color = colors.accent)
-                error != null -> Text(
-                    text = error,
+                error != null -> Column(
                     modifier = Modifier.align(Alignment.Center).padding(24.dp),
-                    color = colors.danger,
-                )
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    Text(text = error, color = colors.danger)
+                    // A load failure usually means the file could not be opened at all (an
+                    // expired picker grant, or the file was moved) — and a save cannot happen
+                    // because nothing is loaded, so the way forward is picking it again.
+                    TextButton(onClick = { backDispatcher?.onBackPressed() }) {
+                        Text("Back to files", color = colors.accent)
+                    }
+                }
                 else -> content(Modifier.fillMaxSize())
             }
         }

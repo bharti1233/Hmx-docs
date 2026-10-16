@@ -81,7 +81,7 @@ class ExcelEditorViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             val result = withContext(Dispatchers.IO) {
                 runCatching {
-                    DocumentIo.tryPersist(ctx, decoded)
+                    DocumentIo.persistAccess(ctx, decoded)
                     val bytes = DocumentIo.readBytes(ctx, decoded)
                     Triple(DocumentIo.displayName(ctx, decoded), bytes, ExcelDocument.read(bytes))
                 }
@@ -101,7 +101,7 @@ class ExcelEditorViewModel(app: Application) : AndroidViewModel(app) {
                 selectedCol = 0
                 loading = false
             }.onFailure {
-                error = it.message ?: "Could not open the spreadsheet."
+                error = DocumentIo.loadError(it, "Could not open the spreadsheet.")
                 loading = false
             }
         }
@@ -235,7 +235,7 @@ class ExcelEditorViewModel(app: Application) : AndroidViewModel(app) {
             val result = withContext(Dispatchers.IO) {
                 runCatching { DocumentIo.writeBytes(ctx, target, ExcelDocument.applyEditsAndSerialize(bytes, snapshot, ops, cwSnapshot, rhSnapshot)) }
             }
-            onResult(result.isSuccess, result.exceptionOrNull()?.message)
+            onResult(result.isSuccess, DocumentIo.saveError(result.exceptionOrNull(), "Could not save the document. Use Export to save a copy."))
         }
     }
 }

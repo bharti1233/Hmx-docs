@@ -227,7 +227,7 @@ class PptEditorViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             val result = withContext(Dispatchers.IO) {
                 runCatching {
-                    DocumentIo.tryPersist(ctx, decoded)
+                    DocumentIo.persistAccess(ctx, decoded)
                     val bytes = DocumentIo.readBytes(ctx, decoded)
                     Triple(DocumentIo.displayName(ctx, decoded), bytes, PptDocument.read(bytes))
                 }
@@ -264,7 +264,7 @@ class PptEditorViewModel(app: Application) : AndroidViewModel(app) {
                 selectedShapeIndex = null
                 loading = false
             }.onFailure {
-                error = it.message ?: "Could not open the presentation."
+                error = DocumentIo.loadError(it, "Could not open the presentation.")
                 loading = false
             }
         }
@@ -645,7 +645,7 @@ class PptEditorViewModel(app: Application) : AndroidViewModel(app) {
                     DocumentIo.writeBytes(ctx, target, serialized)
                 }
             }
-            onResult(result.isSuccess, result.exceptionOrNull()?.message)
+            onResult(result.isSuccess, DocumentIo.saveError(result.exceptionOrNull(), "Could not save the document. Use Export to save a copy."))
         }
     }
 }

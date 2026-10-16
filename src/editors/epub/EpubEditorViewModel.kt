@@ -74,7 +74,7 @@ class EpubEditorViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             val result = withContext(Dispatchers.IO) {
                 runCatching {
-                    DocumentIo.tryPersist(ctx, decoded)
+                    DocumentIo.persistAccess(ctx, decoded)
                     val bytes = DocumentIo.readBytes(ctx, decoded)
                     Triple(DocumentIo.displayName(ctx, decoded), bytes, EpubDocument.read(bytes))
                 }
@@ -86,7 +86,7 @@ class EpubEditorViewModel(app: Application) : AndroidViewModel(app) {
                 chapters = parsed.chapters
                 loading = false
             }.onFailure {
-                error = it.message ?: "Could not open the EPUB."
+                error = DocumentIo.loadError(it, "Could not open the EPUB.")
                 loading = false
             }
         }
@@ -110,7 +110,7 @@ class EpubEditorViewModel(app: Application) : AndroidViewModel(app) {
             val result = withContext(Dispatchers.IO) {
                 runCatching { DocumentIo.writeBytes(ctx, target, EpubDocument.applyEditsAndSerialize(bytes, snapshot)) }
             }
-            onResult(result.isSuccess, result.exceptionOrNull()?.message)
+            onResult(result.isSuccess, DocumentIo.saveError(result.exceptionOrNull(), "Could not save the document. Use Export to save a copy."))
         }
     }
 }

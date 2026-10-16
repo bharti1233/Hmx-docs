@@ -56,7 +56,7 @@ class PdfDocument private constructor(
         /** Opens the PDF at [uri] for reading. Throws [IOException] if it can't be opened. */
         fun open(context: Context, uri: Uri): PdfDocument {
             val pfd = context.contentResolver.openFileDescriptor(uri, "r")
-                ?: throw IOException("Could not open $uri")
+                ?: throw IOException("Could not open the document")
             return try {
                 PdfDocument(pfd, PdfRenderer(pfd))
             } catch (t: Throwable) {

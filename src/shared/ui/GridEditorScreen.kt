@@ -198,11 +198,18 @@ fun GridEditorScreen(
         Box(Modifier.fillMaxSize().padding(padding)) {
             when {
                 loading -> CircularProgressIndicator(Modifier.align(Alignment.Center), color = KernTheme.colors.accent)
-                error != null -> Text(
-                    text = error,
+                error != null -> Column(
                     modifier = Modifier.align(Alignment.Center).padding(24.dp),
-                    color = KernTheme.colors.danger,
-                )
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    Text(text = error, color = KernTheme.colors.danger)
+                    // A load failure usually means the file could not be opened at all (an
+                    // expired picker grant, or the file was moved) — and a save cannot happen
+                    // because nothing is loaded, so the way forward is picking it again.
+                    TextButton(onClick = { backDispatcher?.onBackPressed() }) {
+                        Text("Back to files", color = KernTheme.colors.accent)
+                    }
+                }
                 else -> Column(Modifier.fillMaxSize()) {
                     if (sheetNames.size > 1) SheetBar(sheetNames, currentSheet, onSelectSheet, hue)
                     CellReferenceBar(rows.isNotEmpty(), selectedRow, selectedCol, selectedValue, hue, onEditSelected)

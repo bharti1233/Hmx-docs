@@ -63,7 +63,7 @@ class CsvEditorViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             val result = withContext(Dispatchers.IO) {
                 runCatching {
-                    DocumentIo.tryPersist(ctx, decoded)
+                    DocumentIo.persistAccess(ctx, decoded)
                     DocumentIo.displayName(ctx, decoded) to CsvDocument.parse(DocumentIo.readText(ctx, decoded))
                 }
             }
@@ -75,7 +75,7 @@ class CsvEditorViewModel(app: Application) : AndroidViewModel(app) {
                 selectedCol = 0
                 loading = false
             }.onFailure {
-                error = it.message ?: "Could not open the file."
+                error = DocumentIo.loadError(it, "Could not open the file.")
                 loading = false
             }
         }
@@ -163,7 +163,7 @@ class CsvEditorViewModel(app: Application) : AndroidViewModel(app) {
             val result = withContext(Dispatchers.IO) {
                 runCatching { DocumentIo.writeText(ctx, target, CsvDocument.toCsv(snapshot)) }
             }
-            onResult(result.isSuccess, result.exceptionOrNull()?.message)
+            onResult(result.isSuccess, DocumentIo.saveError(result.exceptionOrNull(), "Could not save the document. Use Export to save a copy."))
         }
     }
 }

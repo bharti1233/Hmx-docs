@@ -17,9 +17,10 @@ import androidx.compose.ui.unit.sp
  *
  * Visual attributes (bold, italic, underline, strike, size, colour) ride on the
  * [AnnotatedString] as [SpanStyle]s so the text field renders them directly. Font
- * family is NOT rendered (the editor draws every run in the UI face for consistency)
- * but is preserved for round-trip by stashing it in a string annotation, so editing a
- * paragraph never drops the document's named fonts.
+ * family and the hyperlink target are NOT rendered (the editor draws every run in the
+ * UI face and does not make links tappable yet) but are preserved for round-trip by
+ * stashing them in string annotations, so editing a paragraph never drops the
+ * document's named fonts or the URL behind a link.
  *
  * Formatting actions operate at run granularity: the current value is converted to
  * runs, the selected range is re-styled (splitting runs at the selection boundaries),
@@ -28,6 +29,7 @@ import androidx.compose.ui.unit.sp
 object WordRichText {
 
     private const val FONT_TAG = "ff"
+    private const val LINK_TAG = "link"
 
     /** Builds an AnnotatedString carrying each run's formatting. */
     fun toAnnotated(runs: List<WordDocument.Run>): AnnotatedString = buildAnnotatedString {
@@ -37,16 +39,19 @@ object WordRichText {
             val span = spanOf(run.style)
             if (span != SpanStyle()) addStyle(span, start, length)
             run.style.fontFamily?.let { addStringAnnotation(FONT_TAG, it, start, length) }
+            run.style.linkUrl?.let { addStringAnnotation(LINK_TAG, it, start, length) }
         }
     }
 
-    /** Splits an AnnotatedString back into runs at every style / font boundary. */
+    /** Splits an AnnotatedString back into runs at every style / font / link boundary. */
     fun toRuns(text: AnnotatedString): List<WordDocument.Run> {
         if (text.text.isEmpty()) return listOf(WordDocument.Run(""))
         val fonts = text.getStringAnnotations(FONT_TAG, 0, text.text.length)
+        val links = text.getStringAnnotations(LINK_TAG, 0, text.text.length)
         val bounds = sortedSetOf(0, text.text.length)
         text.spanStyles.forEach { bounds.add(it.start); bounds.add(it.end) }
         fonts.forEach { bounds.add(it.start); bounds.add(it.end) }
+        links.forEach { bounds.add(it.start); bounds.add(it.end) }
         val points = bounds.filter { it in 0..text.text.length }.toList()
         val out = ArrayList<WordDocument.Run>()
         for (i in 0 until points.size - 1) {
@@ -55,7 +60,8 @@ object WordRichText {
             if (e <= s) continue
             val spans = text.spanStyles.filter { it.start <= s && it.end >= e }.map { it.item }
             val family = fonts.firstOrNull { it.start <= s && it.end >= e }?.item
-            out.add(WordDocument.Run(text.text.substring(s, e), styleOf(spans, family)))
+            val link = links.firstOrNull { it.start <= s && it.end >= e }?.item
+            out.add(WordDocument.Run(text.text.substring(s, e), styleOf(spans, family, link)))
         }
         return collapse(out)
     }
@@ -104,7 +110,7 @@ object WordRichText {
         )
     }
 
-    private fun styleOf(spans: List<SpanStyle>, family: String?): WordDocument.RunStyle {
+    private fun styleOf(spans: List<SpanStyle>, family: String?, linkUrl: String?): WordDocument.RunStyle {
         var bold = false
         var italic = false
         var underline = false
@@ -122,7 +128,7 @@ object WordRichText {
             if (span.fontSize != TextUnit.Unspecified) sizePt = span.fontSize.value
             if (span.color != Color.Unspecified) colorHex = colorToHex(span.color)
         }
-        return WordDocument.RunStyle(bold, italic, underline, strike, sizePt, colorHex, family)
+        return WordDocument.RunStyle(bold, italic, underline, strike, sizePt, colorHex, family, linkUrl)
     }
 
     private fun reStyleRange(
