@@ -18,12 +18,12 @@
 [![Apache POI](https://img.shields.io/badge/Apache%20POI-5.5.1-D22128?style=flat-square&logo=apache&logoColor=white)](https://poi.apache.org/)
 [![OpenCSV](https://img.shields.io/badge/OpenCSV-5.12.0-08427B?style=flat-square)](https://opencsv.sourceforge.net/)
 [![jsoup](https://img.shields.io/badge/jsoup-1.23.2-1D9BF0?style=flat-square)](https://jsoup.org/)
-<!-- PDF engine -->
-<!-- Qyra and MuPDF have no shields.io logos. Swap these plain badges for logo badges if logos become available. -->
-[![Qyra](https://img.shields.io/badge/Qyra-JNI%2FNDK%20bridge-DEA584?style=flat-square&logo=rust&logoColor=white)](https://github.com/zParik/Qyra)
-[![MuPDF](https://img.shields.io/badge/MuPDF-PDF%20engine-C0392B?style=flat-square)](https://mupdf.com/)
+<!-- PDF -->
+<!-- Viewing uses Android's own PdfRenderer; the native bridge is a pure-lopdf tool
+     crate (merge/split), not a MuPDF renderer. Qyra has no shields.io logo. -->
+[![Qyra](https://img.shields.io/badge/Qyra-lopdf%20tools%20bridge-DEA584?style=flat-square&logo=rust&logoColor=white)](https://github.com/zParik/Qyra)
 <!-- Project -->
-[![Version](https://img.shields.io/github/v/tag/verycareful/kern?style=flat-square&label=version&color=3F5B8B&sort=date)](https://github.com/verycareful/kern/tags)
+[![Version](https://img.shields.io/badge/version-0.1.11.0-3F5B8B?style=flat-square)](#versioning)
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-A42E2B?style=flat-square)](LICENSE)
 [![Status: Active](https://img.shields.io/badge/Status-Active-brightgreen?style=flat-square)](.)
 
@@ -31,6 +31,11 @@ A privacy-first, fully offline, open-source Android document toolkit.
 No cloud sync. No data collection. No network access. Completely free. AGPL-3.0.
 
 Kern is in early alpha.
+
+> **This repository is the HMX Docs working copy.** It is the upstream Kern source
+> at tag `0.1.11.0` (AGPL-3.0, © Sricharan Suresh) with Phase 1 build/CI work on
+> top. The app itself is still branded and named Kern; product renaming is a later
+> phase. See [docs/hmx-docs-audit-and-roadmap.md](docs/hmx-docs-audit-and-roadmap.md).
 
 ## What Kern does
 
@@ -50,7 +55,8 @@ Kern works with common document types:
 
 - **Language:** Kotlin + Jetpack Compose
 - **Office formats:** Apache POI (xlsx, docx, pptx) + OpenCSV
-- **PDF engine:** MuPDF via the [Qyra](https://github.com/zParik/Qyra) Rust JNI/NDK bridge (GPL-3.0)
+- **PDF viewing:** Android framework `PdfRenderer` (no native code)
+- **PDF tools** (merge, split): [Qyra](https://github.com/zParik/Qyra) Rust JNI/NDK bridge, pure `lopdf` (GPL-3.0)
 - **License:** AGPL-3.0
 - **Min Android API:** 26 (Android 8.0+)
 
@@ -70,12 +76,13 @@ No network permissions. Ever.
 kern/
 ├── src/
 │   ├── browser/          # File browser + "Open with" intent handling
-│   ├── editors/          # One module per format (csv, excel, word, pdf, pptx)
+│   ├── editors/          # One module per format (csv, excel, word, pdf, pptx, epub)
 │   ├── pdf-bridge/       # Native PDF bridge (JNI/NDK)
-│   └── shared/           # Theme, shared UI, utilities
+│   ├── settings/         # Settings screens
+│   └── shared/           # Theme, shared UI, document IO
 ├── res/                  # Android resources (launcher icon, themes, strings)
 ├── tests/                # Mirrors src/ structure
-├── docs/                 # Architecture notes
+├── docs/                 # Architecture notes, audit and roadmap
 ├── brand/                # Logo assets
 ├── config/               # Lint configuration
 ├── scripts/              # Dev tooling
@@ -84,17 +91,60 @@ kern/
 
 ## Versioning
 
-This project uses an `A.B.C.D` version scheme. Released versions are tagged in git: the current version is whatever the version badge above shows (see the [tags](https://github.com/verycareful/kern/tags)).
+This project uses an `A.B.C.D` version scheme (`versionName` in `build.gradle.kts`).
+Released versions are tagged in git. This repository currently carries
+`0.1.11.0`, imported from upstream Kern, and has no release tags of its own yet.
 
-## Getting started
+## Building
+
+The toolchain is pinned and reproducible: **JDK 17**, **Gradle 8.10.2** (through the
+committed Gradle wrapper, checksum-verified in
+`gradle/wrapper/gradle-wrapper.properties`), **Android SDK platform 35** with
+**build-tools 35.0.0**, Kotlin 2.0.21, AGP 8.7.2.
 
 ```bash
-git clone https://github.com/verycareful/kern.git
+# JVM unit tests (fastest signal; no native code involved)
+./gradlew testDebugUnitTest
+
+# Android Lint (config/lint.xml treats any network API use as an error)
+./gradlew lintDebug
+
+# Debug APK -> build/outputs/apk/debug/kern-debug.apk
+./gradlew assembleDebug
+
+# Release APK, R8 + resource shrinking -> build/outputs/apk/release/*-unsigned.apk
+./gradlew assembleRelease
 ```
 
-Open the folder in Android Studio and press Run. Studio provisions the matching Gradle version (8.10.x, pinned in `gradle/wrapper/gradle-wrapper.properties`) automatically. Prebuilt debug APKs are also attached to each [GitHub Release](https://github.com/verycareful/kern/releases) and to the CI run artifacts.
+Nothing needs to be installed by hand: the wrapper downloads its own Gradle, and
+the Android SDK/platform packages are resolved from the versions above.
 
-See [docs/architecture.md](docs/architecture.md) for system design and [CONTRIBUTING.md](CONTRIBUTING.md) for contributor guidelines.
+**The PDF bridge is optional for a build.** `assembleDebug` only ships working PDF
+merge/split tools if `jniLibs/<abi>/libkern_pdf.so` exists; without it those tools
+degrade gracefully (`QyraPdf.available` is false). CI builds the bridge from a
+pinned Qyra commit - see [src/pdf-bridge/README.md](src/pdf-bridge/README.md).
+
+### Debug vs release APK
+
+| | Debug | Release |
+|---|---|---|
+| Task | `assembleDebug` | `assembleRelease` |
+| File | `kern-debug.apk` | `app-release-unsigned.apk` |
+| Signed | yes, auto-generated debug key | **no - unsigned** |
+| R8 / shrinking | off | on (mapping in `build/outputs/mapping/release/`) |
+
+The release APK is deliberately left **unsigned**: the project has no release
+signing key. An unsigned APK **cannot be installed on a device** — it must be
+signed first (`apksigner sign`) with a key you control. It is produced so the
+release configuration (R8, shrinking, ProGuard rules) is actually exercised and
+so the exact shrink output can be inspected.
+
+This repository does not publish releases. Builds are produced by GitHub Actions:
+open the **Actions** tab, pick a run, and download the
+`kern-debug-apk-<commit sha>` or `kern-release-unsigned-apk-<commit sha>`
+artifact. Each artifact contains a `SHA256SUMS.txt`.
+
+[CONTRIBUTING.md](CONTRIBUTING.md) covers contributor guidelines.
 
 ## License
 
@@ -112,6 +162,8 @@ in normal use. It applies to anyone who forks Kern and adds networking.
 
 See the [LICENSE](LICENSE) file for the full license text.
 
-**PDF engine:** MuPDF via the [Qyra](https://github.com/zParik/Qyra) Rust JNI/NDK
-bridge, licensed GPL-3.0. GPL-3.0 code inside an AGPL-3.0 project is compatible;
-both license headers must be present in the distributed build.
+**PDF tooling:** viewing uses Android's framework `PdfRenderer`. Merge and split
+go through the [Qyra](https://github.com/zParik/Qyra) Rust JNI/NDK bridge
+(`src/pdf-bridge/`, pure `lopdf`, no MuPDF), licensed GPL-3.0. GPL-3.0 code inside
+an AGPL-3.0 project is compatible; both license headers are present in
+`src/pdf-bridge/QyraPdf.kt`.

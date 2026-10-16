@@ -14,9 +14,11 @@ Kern is a single-Activity Android app built with Kotlin and Jetpack Compose. It 
 | Excel editor | `src/editors/excel/` | Apache POI xlsx |
 | Word editor | `src/editors/word/` | Apache POI docx |
 | PowerPoint editor | `src/editors/pptx/` | Apache POI pptx |
-| PDF editor | `src/editors/pdf/` | Compose PDF UI |
-| PDF bridge | `src/pdf-bridge/` | Native PDF bridge (JNI/NDK) |
-| Shared | `src/shared/` | Compose theme, common components, file utilities |
+| EPUB editor | `src/editors/epub/` | jsoup + ZIP, preservation-first save |
+| PDF viewer / tools | `src/editors/pdf/` | Android `PdfRenderer` for viewing, Qyra bridge for merge/split |
+| PDF bridge | `src/pdf-bridge/` | Native PDF tool bridge (JNI/NDK, pure lopdf) |
+| Settings | `src/settings/` | Settings screens |
+| Shared | `src/shared/` | Compose theme, common components, document IO utilities |
 
 ## Navigation
 
@@ -29,6 +31,8 @@ FileBrowser (home)
   -> WordEditor(filePath)
   -> PdfEditor(filePath)
   -> PptEditor(filePath)
+  -> EpubEditor(filePath)
+Settings (from the browser)
 ```
 
 External "Open with" intents bypass FileBrowser and land directly on the correct editor.
@@ -42,7 +46,18 @@ External "Open with" intents bypass FileBrowser and land directly on the correct
 
 ## PDF bridge
 
-PDF rendering is delegated to a native engine through a JNI/NDK bridge declared in `src/pdf-bridge/`. The Kotlin side exposes a small handle-based surface (open, page count, render, close); the native library is loaded at runtime.
+PDF **viewing** uses Android's framework `PdfRenderer` (`src/editors/pdf/PdfDocument.kt`)
+and needs no native code. PDF **tools** - merge and split - are delegated to a
+native Rust crate through the JNI/NDK bridge declared in `src/pdf-bridge/`. The
+Kotlin side exposes a small handle-based surface (open, page count, render,
+close); the native library is loaded at runtime.
+
+The native side is `kern-bridge` in the Qyra fork: pure `lopdf` + `jni`, with no
+MuPDF and no `ndk-context`, so it takes plain filesystem paths. It is built by
+`cargo ndk` into `jniLibs/<abi>/libkern_pdf.so` (gitignored, produced in CI by
+`.github/actions/build-pdf-bridge` from a pinned Qyra commit). When the library is
+absent, `QyraPdf.available` is false and the tools degrade gracefully instead of
+crashing. See [src/pdf-bridge/README.md](../src/pdf-bridge/README.md).
 
 ## Data flow
 
@@ -52,11 +67,28 @@ PDF rendering is delegated to a native engine through a JNI/NDK bridge declared 
 4. Compose renders the editable state.
 5. On save, the editor writes back to the original URI/path.
 
+## Build and CI
+
+Single Gradle module. The Gradle wrapper is committed
+(`gradlew`, `gradle/wrapper/`), pinned to Gradle 8.10.2 and checksum-verified, so a
+clean checkout builds without a preinstalled Gradle. JDK 17, compileSdk 35,
+build-tools 35.0.0.
+
+GitHub Actions (`.github/workflows/`) runs the checks:
+
+| Workflow | Trigger | Runs |
+|----------|---------|------|
+| `android.yml` | push/PR to `main` | `assembleDebug` (+ native bridge), `testDebugUnitTest`, `lintDebug`; uploads the debug APK, test report and lint report |
+| `release-build-check.yml` | push/PR to `main` | `assembleRelease` (R8 + shrinking), verifies the APK is unsigned, uploads the unsigned release APK and the R8 mapping |
+| `release.yml` | version tag | builds and publishes a **debug** APK (no release signing key exists yet) |
+
 ## Dependencies
 
 | Library | Purpose | License |
 |---------|---------|---------|
-| Apache POI | xlsx, docx, pptx | Apache 2.0 |
-| OpenCSV | CSV parsing | Apache 2.0 |
-| Jetpack Compose | UI | Apache 2.0 |
-| Kotlin Coroutines | Async file ops | Apache 2.0 |
+| Apache POI | xlsx, docx, pptx | Apache-2.0 |
+| OpenCSV | CSV parsing | Apache-2.0 |
+| jsoup | EPUB (XHTML) parsing/editing | MIT |
+| Jetpack Compose / AndroidX | UI | Apache-2.0 |
+| Kotlin Coroutines | Async file ops | Apache-2.0 |
+| Qyra `kern-bridge` (native `.so`) | PDF merge/split | GPL-3.0 |
