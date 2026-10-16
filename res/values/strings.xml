@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Kern</string>
+    <string name="browser_title">Kern</string>
+    <string name="browser_empty">Tap \"Open file\" to choose a document. Kern edits it in place - nothing is copied or uploaded.</string>
+</resources>
