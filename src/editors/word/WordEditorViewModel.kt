@@ -260,17 +260,26 @@ class WordEditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun onValueChange(index: Int, value: TextFieldValue) {
-        val previous = fields[index]
-        if (previous != null && previous.annotatedString.text != value.annotatedString.text) {
-            pushSnapshot()
-        }
-        fields[index] = value
+        // The text field's own value is a plain-text buffer: it emits the text and the
+        // selection but never the formatting, so only those two are taken from it. The
+        // stored value stays the authority for styles and the text change is applied to it.
+        val stored = fields[index]
+            ?: TextFieldValue(WordRichText.toAnnotated(paragraphRuns(index)))
+        val merged = WordRichText.mergeEmission(stored, value)
+        val textChanged = stored.annotatedString.text != merged.annotatedString.text
+        if (textChanged) pushSnapshot()
+        fields[index] = merged
         focusedIndex = index
-        if (previous == null || previous.annotatedString != value.annotatedString) {
-            edits[index] = WordRichText.toRuns(value.annotatedString)
+        if (textChanged) {
+            edits[index] = WordRichText.toRuns(merged.annotatedString)
             dirty = true
         }
     }
+
+    /** The runs a paragraph was read with; the fallback is for a field not yet touched. */
+    private fun paragraphRuns(index: Int): List<WordDocument.Run> =
+        (blocks.getOrNull(index) as? WordDocument.ParagraphBlock)?.runs
+            ?: listOf(WordDocument.Run(""))
 
     fun canFormat(): Boolean {
         val idx = focusedIndex ?: return false
@@ -575,12 +584,14 @@ class WordEditorViewModel(app: Application) : AndroidViewModel(app) {
             editTableCell(match.blockIndex, match.row, match.col, replaced)
         } else {
             val field = fields[match.blockIndex] ?: return
-            val raw = field.text
-            val replaced = replaceNth(raw, searchQuery, replaceQuery, match.matchIndexInBlock)
-            val runs = WordRichText.toRuns(field.annotatedString)
-            val updatedAnnotated = WordRichText.toAnnotated(WordRichText.toRuns(androidx.compose.ui.text.AnnotatedString(replaced)))
-            fields[match.blockIndex] = field.copy(annotatedString = updatedAnnotated)
-            edits[match.blockIndex] = WordRichText.toRuns(updatedAnnotated)
+            val runs = WordRichText.replaceRuns(
+                WordRichText.toRuns(field.annotatedString),
+                searchQuery,
+                replaceQuery,
+                only = match.matchIndexInBlock,
+            )
+            fields[match.blockIndex] = field.copy(annotatedString = WordRichText.toAnnotated(runs))
+            edits[match.blockIndex] = runs
             dirty = true
         }
         if (currentMatchIndex >= matches.size && matches.isNotEmpty()) {
@@ -596,10 +607,15 @@ class WordEditorViewModel(app: Application) : AndroidViewModel(app) {
                 is WordDocument.ParagraphBlock -> {
                     val field = fields[i] ?: return@forEachIndexed
                     if (field.text.contains(searchQuery, ignoreCase = true)) {
-                        val newText = field.text.replace(searchQuery, replaceQuery, ignoreCase = true)
-                        val newAnnotated = androidx.compose.ui.text.AnnotatedString(newText)
-                        fields[i] = field.copy(annotatedString = newAnnotated)
-                        edits[i] = WordRichText.toRuns(newAnnotated)
+                        // Rebuilt from the paragraph's own runs: a replacement keeps the
+                        // formatting of the text around it instead of flattening the block.
+                        val runs = WordRichText.replaceRuns(
+                            WordRichText.toRuns(field.annotatedString),
+                            searchQuery,
+                            replaceQuery,
+                        )
+                        fields[i] = field.copy(annotatedString = WordRichText.toAnnotated(runs))
+                        edits[i] = runs
                         dirty = true
                     }
                 }

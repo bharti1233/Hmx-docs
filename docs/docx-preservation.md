@@ -341,10 +341,23 @@ files for the round-trip cases.
 23. **Two documents in a row via "Open with".** Edit a document without saving, then open a
     second document from Files with "Open with". *Expected:* the second opens on top; back
     returns to the first with its unsaved edits still there (Phase 3 change, ADR 0003).
+24. **Formatting survives the keyboard.** Open a document, put the caret in a paragraph, tap
+    Bold (and separately Italic, Underline, Strikethrough, Size, Colour), then tap elsewhere
+    in the text, move the caret with the arrows or a tap, type, backspace, let autocorrect
+    fix a misspelled word, and finally save. *Expected:* the formatting is still on screen
+    after every one of those interactions and is still in the file after save and reopen.
+    Before this fix any IME command replaced the paragraph's formatting with the text
+    field's own span-less value, so this step failing again means the field's value is being
+    trusted for formatting somewhere new. The merge policy is unit-tested
+    (`tests/editors/word/WordRichTextTest.kt`); the IME path itself is device work only.
+25. **Find & replace keeps the surrounding formatting.** Put a plain word in a paragraph that
+    also has bold or coloured text, then Replace and Replace all that word. *Expected:* only
+    the searched text changes; the formatting of the rest of the paragraph stays.
 
 Steps 4, 5 and 12 are the ones Phase 2's changes were meant to alter; steps 15–18 cover the
-access-recovery follow-up; steps 19–23 cover the Phase 3 save-safety changes; steps 6–11 are
-the ones the preservation suite predicts and a device must confirm. A device is the only
+access-recovery follow-up; steps 19–23 cover the Phase 3 save-safety changes; steps 24–25
+cover the rich-text editing fix (the editor, not the text field, owns formatting); steps 6–11
+are the ones the preservation suite predicts and a device must confirm. A device is the only
 place any of them can be settled.
 
 ## 9. Out of scope for this phase

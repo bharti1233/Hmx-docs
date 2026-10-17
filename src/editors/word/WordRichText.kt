@@ -68,16 +68,9 @@ object WordRichText {
 
     /** The style at the caret (collapsed selection) or the start of the selection. */
     fun styleAt(value: TextFieldValue): WordDocument.RunStyle {
-        val runs = toRuns(value.annotatedString)
         val sel = value.selection
         val at = if (sel.collapsed) (sel.start - 1).coerceAtLeast(0) else sel.min
-        var pos = 0
-        for (run in runs) {
-            val end = pos + run.text.length
-            if (at < end) return run.style
-            pos = end
-        }
-        return runs.lastOrNull()?.style ?: WordDocument.RunStyle()
+        return styleAtChar(toRuns(value.annotatedString), at)
     }
 
     /**
@@ -92,6 +85,141 @@ object WordRichText {
         val to = if (sel.collapsed) total else sel.max
         val restyled = reStyleRange(runs, from, to, transform)
         return value.copy(annotatedString = toAnnotated(restyled))
+    }
+
+    // ---- text edits ---------------------------------------------------------
+
+    /**
+     * Reconciles a text-field emission with the styled value the editor owns.
+     *
+     * The value-based text field keeps a plain-text buffer, so every value it emits carries
+     * the text and the selection but no spans. Its emission is therefore the authority for
+     * text and selection only; [stored] stays the authority for formatting:
+     *
+     *  - unchanged text (tap, caret move, handle drag, focus, IME bookkeeping): keep the
+     *    styled text and adopt just the selection and composition range;
+     *  - changed text (typing, backspace, paste, selection replacement, autocorrect): apply
+     *    the text difference to the stored runs, see [editRuns].
+     */
+    fun mergeEmission(stored: TextFieldValue, emitted: TextFieldValue): TextFieldValue {
+        val newText = emitted.annotatedString.text
+        if (newText == stored.annotatedString.text) {
+            return emitted.copy(annotatedString = stored.annotatedString)
+        }
+        return emitted.copy(annotatedString = toAnnotated(editRuns(stored.annotatedString, newText)))
+    }
+
+    /** [mergeEmission] for a stored [AnnotatedString] rather than a whole field value. */
+    fun editRuns(stored: AnnotatedString, newText: String): List<WordDocument.Run> =
+        editRuns(toRuns(stored), newText)
+
+    /**
+     * Applies [newText] to [runs], keeping the style of every run outside the edit. The
+     * longest common prefix and suffix of old and new text are kept as they are; the middle
+     * is replaced by the new text, which takes the style of the text it replaces — the first
+     * character of the replaced range, or the character before the caret for a pure insertion
+     * (so typing inside a bold run stays bold and a rewritten word keeps its own look).
+     *
+     * One emission is one contiguous replacement: if an IME batches several unrelated edits
+     * together, the text still comes out exactly right while the styles of the replaced
+     * middle take a single surrounding style.
+     */
+    fun editRuns(runs: List<WordDocument.Run>, newText: String): List<WordDocument.Run> {
+        val old = runs.joinToString("") { it.text }
+        if (old == newText) return runs
+        val prefix = commonPrefix(old, newText)
+        val suffix = commonSuffix(old, newText, prefix)
+        val oldEnd = old.length - suffix
+        val inserted = newText.substring(prefix, newText.length - suffix)
+        val style = if (oldEnd > prefix) {
+            styleAtChar(runs, prefix)
+        } else {
+            styleAtChar(runs, (prefix - 1).coerceAtLeast(0))
+        }
+        val out = ArrayList<WordDocument.Run>()
+        out.addAll(sliceRuns(runs, 0, prefix))
+        if (inserted.isNotEmpty()) out.add(WordDocument.Run(inserted, style))
+        out.addAll(sliceRuns(runs, oldEnd, old.length))
+        return collapse(out)
+    }
+
+    /**
+     * Replacements of [target] in [runs]. Every occurrence is replaced when [only] is null,
+     * otherwise just that 0-based match — the same counting the find bar uses. Case is
+     * ignored, matches never overlap, text outside a match keeps its runs, and the
+     * replacement takes the style of the match it stands in for.
+     */
+    fun replaceRuns(
+        runs: List<WordDocument.Run>,
+        target: String,
+        replacement: String,
+        only: Int? = null,
+    ): List<WordDocument.Run> {
+        if (target.isEmpty()) return runs
+        val text = runs.joinToString("") { it.text }
+        val positions = ArrayList<Int>()
+        var seen = 0
+        var start = 0
+        while (start < text.length) {
+            val pos = text.indexOf(target, start, ignoreCase = true)
+            if (pos < 0) break
+            if (only == null || seen == only) positions.add(pos)
+            seen++
+            if (only != null && seen > only) break
+            start = pos + target.length
+        }
+        if (positions.isEmpty()) return runs
+        val out = ArrayList<WordDocument.Run>()
+        var cursor = 0
+        for (pos in positions) {
+            out.addAll(sliceRuns(runs, cursor, pos))
+            if (replacement.isNotEmpty()) out.add(WordDocument.Run(replacement, styleAtChar(runs, pos)))
+            cursor = pos + target.length
+        }
+        out.addAll(sliceRuns(runs, cursor, text.length))
+        return collapse(out)
+    }
+
+    private fun commonPrefix(a: String, b: String): Int {
+        val max = minOf(a.length, b.length)
+        var i = 0
+        while (i < max && a[i] == b[i]) i++
+        return i
+    }
+
+    private fun commonSuffix(a: String, b: String, prefix: Int): Int {
+        val max = minOf(a.length - prefix, b.length - prefix)
+        var i = 0
+        while (i < max && a[a.length - 1 - i] == b[b.length - 1 - i]) i++
+        return i
+    }
+
+    /** The part of [runs] between [from] and [to], split at those offsets. */
+    private fun sliceRuns(runs: List<WordDocument.Run>, from: Int, to: Int): List<WordDocument.Run> {
+        if (to <= from) return emptyList()
+        val out = ArrayList<WordDocument.Run>()
+        var pos = 0
+        for (run in runs) {
+            val start = pos
+            val end = pos + run.text.length
+            pos = end
+            if (end <= from || start >= to) continue
+            val a = (from - start).coerceIn(0, run.text.length)
+            val b = (to - start).coerceIn(0, run.text.length)
+            if (b > a) out.add(run.copy(text = run.text.substring(a, b)))
+        }
+        return out
+    }
+
+    /** The style of the run covering [index], or the last run's when past the end. */
+    private fun styleAtChar(runs: List<WordDocument.Run>, index: Int): WordDocument.RunStyle {
+        var pos = 0
+        for (run in runs) {
+            val end = pos + run.text.length
+            if (index < end) return run.style
+            pos = end
+        }
+        return runs.lastOrNull()?.style ?: WordDocument.RunStyle()
     }
 
     // ---- style <-> span mapping --------------------------------------------
