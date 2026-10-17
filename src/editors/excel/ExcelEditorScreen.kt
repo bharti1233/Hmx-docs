@@ -19,6 +19,7 @@ fun ExcelEditorScreen(
     GridEditorScreen(
         title = vm.fileName.ifBlank { "Excel" },
         dirty = vm.dirty,
+        saving = vm.saving,
         loading = vm.loading,
         error = vm.error,
         onRetry = if (vm.canRetry) vm::retry else null,

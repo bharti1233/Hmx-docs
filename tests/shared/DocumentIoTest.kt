@@ -5,8 +5,13 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
+import java.io.ByteArrayOutputStream
+import java.io.File
 import java.io.FileNotFoundException
 import java.io.IOException
+import java.nio.file.Files
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
 
 /**
  * Unit tests for the decisions [DocumentIo] makes about document access and writes.
@@ -235,6 +240,152 @@ class DocumentIoTest {
     @Test
     fun saveError_unknownFailure_usesTheCallersFallback() {
         assertEquals("Save failed.", DocumentIo.saveError(IllegalStateException("stale block"), "Save failed."))
+    }
+
+    @Test
+    fun saveError_refusedReplacement_saysTheFileIsUnchanged() {
+        val message = DocumentIo.saveError(
+            DocumentIo.DocumentNotWrittenException("Serialized document did not pass its integrity check"),
+            "Could not save the document.",
+        )
+        assertTrue("was: $message", message.contains("left unchanged"))
+        assertTrue("was: $message", message.contains("Export"))
+    }
+
+    // ---- save integrity ------------------------------------------------------
+
+    @Test
+    fun verifyZipPackage_acceptsACompletePackage() {
+        val package_ = zip(
+            "[Content_Types].xml" to "<Types/>".toByteArray(),
+            "word/document.xml" to "<w:document/>".toByteArray(),
+        )
+        assertTrue("a complete package must pass", DocumentIo.verifyZipPackage(package_))
+    }
+
+    @Test
+    fun verifyZipPackage_rejectsATruncatedPackage() {
+        // What an interrupted save would leave behind. Writing these bytes over the
+        // document is exactly the data loss the check exists to stop.
+        val complete = zip("word/document.xml" to "x".repeat(4096).toByteArray())
+        assertFalse(DocumentIo.verifyZipPackage(complete.copyOf(complete.size / 2)))
+    }
+
+    @Test
+    fun verifyZipPackage_rejectsAPackageWithoutItsCentralDirectory() {
+        // Every entry is intact, but the end record was never written: readers such as
+        // Word reject this, so it must not replace a document either.
+        val complete = zip("word/document.xml" to "<w:document/>".toByteArray())
+        val centralDirectory = indexOf(complete, byteArrayOf(0x50, 0x4b, 0x01, 0x02))
+        assertTrue("the fixture has a central directory to cut off", centralDirectory > 0)
+        assertFalse(DocumentIo.verifyZipPackage(complete.copyOf(centralDirectory)))
+    }
+
+    @Test
+    fun verifyZipPackage_rejectsGarbageAndAnEmptyPackage() {
+        assertFalse("no bytes at all", DocumentIo.verifyZipPackage(ByteArray(0)))
+        assertFalse("not a package", DocumentIo.verifyZipPackage("not a document".toByteArray()))
+        assertFalse("a zip with no entries", DocumentIo.verifyZipPackage(zip()))
+    }
+
+    @Test
+    fun writeChecked_failedCheck_neverOpensTheDestination() {
+        // Regression: the destination used to be replaced with whatever the serializer
+        // produced, so a bad serialization destroyed the last valid copy.
+        var writes = 0
+        try {
+            DocumentIo.writeChecked(REPLACEMENT, PREVIOUS, verify = { false }) { writes++ }
+            fail("a refused replacement must reach the caller")
+        } catch (refused: IOException) {
+            assertTrue(
+                "refused before anything was written, was: ${refused.javaClass.simpleName}",
+                refused is DocumentIo.DocumentNotWrittenException,
+            )
+        }
+        assertEquals("the destination is never touched", 0, writes)
+    }
+
+    @Test
+    fun writeChecked_acceptedCheck_writesTheReplacement() {
+        var content = PREVIOUS
+        DocumentIo.writeChecked(REPLACEMENT, PREVIOUS, verify = { true }) { content = it }
+        assertEquals(REPLACEMENT.decodeToString(), content.decodeToString())
+    }
+
+    @Test
+    fun writeChecked_flushFailure_restoresThePreviousContent() {
+        // The bytes arrive, then the stream reports the failure on flush/close. The
+        // rollback still runs, and the failure still reaches the caller.
+        var content = PREVIOUS
+        var attempt = 0
+        try {
+            DocumentIo.writeChecked(REPLACEMENT, PREVIOUS, verify = { true }) {
+                attempt++
+                content = it
+                if (attempt == 1) throw IOException("flush failed")
+            }
+            fail("a failed write must reach the caller")
+        } catch (reported: IOException) {
+            assertEquals("flush failed", reported.message)
+            assertEquals("the last valid copy is restored", PREVIOUS.decodeToString(), content.decodeToString())
+        }
+        assertEquals("written once, rolled back once", 2, attempt)
+    }
+
+    @Test
+    fun replaceFileAtomically_replacesTheContentAndLeavesNoTemporaryBehind() {
+        val directory = Files.createTempDirectory("kern-save").toFile()
+        val document = File(directory, "report.docx")
+        document.writeBytes(PREVIOUS)
+
+        DocumentIo.replaceFileAtomically(document, REPLACEMENT)
+
+        assertEquals(REPLACEMENT.decodeToString(), document.readText())
+        assertEquals(
+            "the temporary is renamed onto the document, not left next to it",
+            listOf("report.docx"),
+            directory.list()?.sorted(),
+        )
+    }
+
+    @Test
+    fun replaceFileAtomically_refusedReplacement_leavesTheDocumentUntouched() {
+        val directory = Files.createTempDirectory("kern-save").toFile()
+        val document = File(directory, "report.docx")
+        document.writeBytes(PREVIOUS)
+
+        try {
+            DocumentIo.replaceFileAtomically(document, REPLACEMENT, verify = { false })
+            fail("a refused replacement must reach the caller")
+        } catch (_: DocumentIo.DocumentNotWrittenException) {
+            // expected
+        }
+
+        assertEquals("the previous content is still there", PREVIOUS.decodeToString(), document.readText())
+        assertEquals(listOf("report.docx"), directory.list()?.sorted())
+    }
+
+    /** A zip package built here, so the check is tested against real bytes, not a mock. */
+    private fun zip(vararg entries: Pair<String, ByteArray>): ByteArray {
+        val out = ByteArrayOutputStream()
+        ZipOutputStream(out).use { zip ->
+            for ((name, content) in entries) {
+                zip.putNextEntry(ZipEntry(name))
+                zip.write(content)
+                zip.closeEntry()
+            }
+        }
+        return out.toByteArray()
+    }
+
+    private fun indexOf(haystack: ByteArray, needle: ByteArray): Int {
+        outer@ for (start in 0..haystack.size - needle.size) {
+            for (offset in needle.indices) {
+                if (haystack[start + offset] != needle[offset]) continue@outer
+            }
+            return start
+        }
+        return -1
     }
 
     private companion object {

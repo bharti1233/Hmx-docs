@@ -38,6 +38,8 @@ import kotlinx.coroutines.launch
  *
  * @param onRetry offered in the error state when another read could succeed (access
  *        renewed, provider recovered); null when the failure is not worth retrying.
+ * @param saving true while a save is running: the state reads "Saving…" and Save is
+ *        disabled, so a second tap cannot start a second write over the same document.
  * @param hue the file-format identity colour (title square, save-state).
  * @param toolbar optional bottom toolbar (e.g. an [EditorToolbar]).
  * @param content rendered only once loaded; receives a Modifier carrying the
@@ -52,6 +54,7 @@ fun EditorChrome(
     error: String?,
     onRetry: (() -> Unit)? = null,
     hue: Color,
+    saving: Boolean = false,
     onSave: (onResult: (Boolean, String?) -> Unit) -> Unit,
     exportMimeType: String,
     exportFileName: String,
@@ -86,8 +89,14 @@ fun EditorChrome(
                 title = title,
                 monoTitle = true,
                 formatColor = hue,
-                subtitle = if (dirty) "● Unsaved changes" else "Saved · on-device",
-                subtitleColor = if (dirty) colors.accent else null,
+                // Never "Saved" before the write finished, and never the unsaved marker while
+                // the write it reports on is still running.
+                subtitle = when {
+                    saving -> "Saving…"
+                    dirty -> "● Unsaved changes"
+                    else -> "Saved · on-device"
+                },
+                subtitleColor = if (dirty && !saving) colors.accent else null,
                 onBack = { backDispatcher?.onBackPressed() },
                 actions = {
                     extraActions?.invoke()
@@ -100,8 +109,8 @@ fun EditorChrome(
                                 else errorDialog = "Save failed" to (msg ?: "This file is read-only. Use Export to save a copy.")
                             }
                         },
-                        enabled = dirty,
-                        tint = if (dirty) colors.accent else null,
+                        enabled = dirty && !saving,
+                        tint = if (dirty && !saving) colors.accent else null,
                     )
                     KernIconButton(KernIcons.Download, "Export a copy", onClick = { exportLauncher.launch(exportFileName) })
                 },

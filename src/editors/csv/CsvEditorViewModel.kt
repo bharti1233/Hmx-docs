@@ -31,6 +31,11 @@ class CsvEditorViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var dirty by mutableStateOf(false)
         private set
+
+    /** True while a save of this document is running; a second save is refused meanwhile. */
+    var saving by mutableStateOf(false)
+        private set
+
     var error by mutableStateOf<String?>(null)
         private set
 
@@ -175,18 +180,31 @@ class CsvEditorViewModel(app: Application) : AndroidViewModel(app) {
     /** Writes back to the original URI. */
     fun save(onResult: (ok: Boolean, message: String?) -> Unit) {
         val target = uri ?: run { onResult(false, "Nothing to save."); return }
-        write(target) { ok, msg ->
-            if (ok) dirty = false
+        if (saving) { onResult(false, "A save is already running."); return }
+        val written = snapshotForSave()
+        saving = true
+        write(target, written) { ok, msg ->
+            saving = false
+            // Only the revision that was written may clear the flag: edits made while the
+            // save ran are still unsaved.
+            if (ok && snapshotForSave() == written) dirty = false
             onResult(ok, msg)
         }
     }
 
     /** Writes a copy to a user-chosen URI (Save as). */
-    fun exportTo(target: Uri, onResult: (ok: Boolean, message: String?) -> Unit) = write(target, onResult)
+    fun exportTo(target: Uri, onResult: (ok: Boolean, message: String?) -> Unit) =
+        write(target, snapshotForSave(), onResult)
 
-    private fun write(target: Uri, onResult: (ok: Boolean, message: String?) -> Unit) {
+    /** The grid as one save writes it; a copy, so a later edit cannot leak into the write. */
+    private fun snapshotForSave(): List<List<String>> = rows.map { it.toList() }
+
+    private fun write(
+        target: Uri,
+        snapshot: List<List<String>>,
+        onResult: (ok: Boolean, message: String?) -> Unit,
+    ) {
         val ctx = getApplication<Application>()
-        val snapshot = rows.map { it.toList() }
         viewModelScope.launch {
             val result = withContext(Dispatchers.IO) {
                 runCatching { DocumentIo.writeText(ctx, target, CsvDocument.toCsv(snapshot)) }

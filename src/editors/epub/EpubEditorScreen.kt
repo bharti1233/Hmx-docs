@@ -58,6 +58,7 @@ fun EpubEditorScreen(
     EditorChrome(
         title = vm.bookTitle.ifBlank { vm.fileName.ifBlank { "Book" } },
         dirty = vm.dirty,
+        saving = vm.saving,
         loading = vm.loading,
         error = vm.error,
         onRetry = if (vm.canRetry) vm::retry else null,

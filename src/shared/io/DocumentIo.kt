@@ -6,9 +6,14 @@ import android.content.Intent
 import android.net.Uri
 import android.provider.OpenableColumns
 import android.util.Log
+import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.FileNotFoundException
+import java.io.FileOutputStream
 import java.io.IOException
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
+import java.util.zip.ZipInputStream
 
 /**
  * Reads and writes documents directly at their content:// URI. Kern never copies
@@ -35,6 +40,13 @@ object DocumentIo {
 
     /** [readBytes]'s own text for a provider that returned no stream; classified as retryable. */
     internal const val NO_STREAM = "Provider returned no input stream"
+
+    /**
+     * A replacement was refused before anything was opened, so the document on disk still
+     * holds its last valid version. Thrown by [writeBytes] when [verifyZipPackage] rejects
+     * the bytes; [saveError] turns it into the matching user-facing message.
+     */
+    internal class DocumentNotWrittenException(message: String) : IOException(message)
 
     /** Long-lived access modes for a document URI. */
     enum class UriAccess { READ, WRITE }
@@ -64,23 +76,38 @@ object DocumentIo {
         String(readBytes(context, uri), Charsets.UTF_8)
 
     /**
-     * Overwrites the document with [bytes].
+     * Replaces the document with [bytes].
      *
-     * The replacement is serialized in full by the caller before this runs, and the
-     * previous content is kept as a rollback copy so a write that fails part-way through
-     * (provider error, disk full, revoked access) cannot leave the document truncated.
-     * Neither SAF nor the platform file APIs guarantee an atomic replace, so this is the
-     * strongest guarantee available without a provider-specific copy step: if the rollback
-     * also fails, the save is reported as failed and the user is told.
+     * The replacement is serialized in full by the caller before this runs, and — when
+     * [verify] is given — it has to accept those bytes first ([verifyZipPackage] is the
+     * check the editors pass), so an incomplete document never opens the destination.
+     *
+     * A local file is replaced by renaming a fully written temporary file over it: a
+     * failure anywhere leaves the previous document in place and needs no rollback copy.
+     * A content:// destination has no such rename — the platform offers no atomic replace
+     * — so the previous content is kept as a rollback copy and written back when the write
+     * fails. That rollback only runs while this process is alive: a kill mid-write can
+     * leave the document damaged, and the caller still reports the save as failed rather
+     * than as a success.
      */
-    fun writeBytes(context: Context, uri: Uri, bytes: ByteArray) {
-        val previous = runCatching { readBytes(context, uri) }.getOrNull()
+    fun writeBytes(
+        context: Context,
+        uri: Uri,
+        bytes: ByteArray,
+        verify: ((ByteArray) -> Boolean)? = null,
+    ) {
         if (uri.scheme == "file") {
             val path = uri.path ?: throw IOException("Invalid file URI")
-            writeGuarded(bytes, previous) { File(path).writeBytes(it) }
+            replaceFileAtomically(File(path), bytes, verify)
             return
         }
-        writeGuarded(bytes, previous) { data ->
+        // Without the previous content there is nothing to restore; say so instead of
+        // silently writing a document that cannot be rolled back.
+        val previous = runCatching { readBytes(context, uri) }.getOrNull()
+        if (previous == null) {
+            Log.i(TAG, "No rollback copy could be read for this ${uri.scheme} document (${uri.authority})")
+        }
+        writeChecked(bytes, previous, verify) { data ->
             val out = context.contentResolver.openOutputStream(uri, "wt")
                 ?: throw FileNotFoundException("Provider returned no output stream")
             out.use {
@@ -93,6 +120,131 @@ object DocumentIo {
     /** Overwrites the document with [text] as UTF-8. */
     fun writeText(context: Context, uri: Uri, text: String) =
         writeBytes(context, uri, text.toByteArray(Charsets.UTF_8))
+
+    /**
+     * Checks [bytes] with [verify] and only then writes them through [write], restoring
+     * [previous] if that write fails. A failed check throws [DocumentNotWrittenException]
+     * before the destination is touched, so a replacement that would not survive being read
+     * back never replaces the last valid copy.
+     */
+    internal fun writeChecked(
+        bytes: ByteArray,
+        previous: ByteArray?,
+        verify: ((ByteArray) -> Boolean)?,
+        write: (ByteArray) -> Unit,
+    ) {
+        requireIntact(bytes, verify)
+        writeGuarded(bytes, previous, write)
+    }
+
+    /**
+     * Replaces a local file with [bytes] by writing a temporary file next to it and renaming
+     * that over the document: a reader sees either the previous file or the complete new
+     * one, never a half-written document, and a failure before the rename leaves the file
+     * untouched. The temporary lives in the same directory, because a rename only replaces
+     * within one filesystem.
+     */
+    internal fun replaceFileAtomically(
+        target: File,
+        bytes: ByteArray,
+        verify: ((ByteArray) -> Boolean)? = null,
+    ) {
+        requireIntact(bytes, verify)
+        val directory = target.parentFile
+            ?: throw IOException("No directory to replace the document in")
+        val temp = File.createTempFile("${target.name}.", ".tmp", directory)
+        try {
+            FileOutputStream(temp).use { out ->
+                out.write(bytes)
+                out.flush()
+                // Reach the storage before the rename: the new name must not end up
+                // pointing at content that never landed.
+                out.fd.sync()
+            }
+            moveOver(temp, target)
+        } catch (failure: Throwable) {
+            // The document still holds its previous content; drop the half-written copy.
+            temp.delete()
+            throw failure
+        }
+    }
+
+    /** Renames [temp] over [target], replacing it. */
+    private fun moveOver(temp: File, target: File) {
+        val atomic = runCatching {
+            Files.move(
+                temp.toPath(),
+                target.toPath(),
+                StandardCopyOption.REPLACE_EXISTING,
+                StandardCopyOption.ATOMIC_MOVE,
+            )
+        }.exceptionOrNull()
+        if (atomic == null) return
+        // Some filesystems cannot rename over an existing file atomically. A plain replace
+        // is still a rename (old document or new one, never half-written), just not
+        // guaranteed atomic.
+        Log.w(TAG, "Atomic replace not available (${atomic.javaClass.simpleName}); replacing directly")
+        val plain = runCatching {
+            Files.move(temp.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING)
+        }.exceptionOrNull()
+        if (plain != null && !temp.renameTo(target)) {
+            throw IOException("Could not replace the document", plain)
+        }
+    }
+
+    /**
+     * Whether [bytes] is a complete zip package: it has entries, every entry inflates to its
+     * end, and the end-of-central-directory record is present.
+     *
+     * This is the check the editors run before replacing a document, and it catches exactly
+     * what would otherwise be written over a good file: a truncated or partially generated
+     * package. It is not a semantic check — a package that passes can still differ from what
+     * the editor showed, which is what the preservation suite and docs/docx-preservation.md
+     * are for.
+     */
+    fun verifyZipPackage(bytes: ByteArray): Boolean {
+        if (bytes.isEmpty()) return false
+        val entries = runCatching {
+            var count = 0
+            ZipInputStream(ByteArrayInputStream(bytes)).use { zip ->
+                val buffer = ByteArray(16 * 1024)
+                var entry = zip.nextEntry
+                while (entry != null) {
+                    // Reading to the end of the entry is what detects a truncated stream.
+                    while (zip.read(buffer) != -1) {
+                        // The entry's content only matters here through reaching its end.
+                    }
+                    zip.closeEntry()
+                    count++
+                    entry = zip.nextEntry
+                }
+            }
+            count
+        }.getOrDefault(-1)
+        // ZipInputStream reads the local headers only, so a package whose central directory
+        // was never written would pass that walk but still fail in Word and other readers.
+        return entries > 0 && hasCentralDirectory(bytes)
+    }
+
+    /** Whether the end-of-central-directory record is there; a zip comment can push it back. */
+    private fun hasCentralDirectory(bytes: ByteArray): Boolean {
+        val from = (bytes.size - 65_536).coerceAtLeast(0)
+        for (i in bytes.size - 22 downTo from) {
+            if (bytes[i] == 'P'.code.toByte() &&
+                bytes[i + 1] == 'K'.code.toByte() &&
+                bytes[i + 2] == 0x05.toByte() &&
+                bytes[i + 3] == 0x06.toByte()
+            ) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private fun requireIntact(bytes: ByteArray, verify: ((ByteArray) -> Boolean)?) {
+        if (verify == null || verify(bytes)) return
+        throw DocumentNotWrittenException("Serialized document did not pass its integrity check")
+    }
 
     /**
      * Writes [bytes] through [write], restoring [previous] if that write fails.
@@ -253,6 +405,9 @@ object DocumentIo {
 
     /** A message for a failed document write; the wording matches the editors' save dialog. */
     fun saveError(failure: Throwable?, fallback: String): String = when (failure) {
+        // Refused before anything was written: the file still holds its last valid content.
+        is DocumentNotWrittenException ->
+            "The updated document could not be written safely, so the file was left unchanged. Use Export to save a copy."
         is SecurityException, is FileNotFoundException -> "This file can't be changed. Use Export to save a copy."
         else -> fallback
     }

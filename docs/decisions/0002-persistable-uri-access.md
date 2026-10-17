@@ -159,10 +159,12 @@ around it turned up three real defects and one rough edge, all fixed here.
 4. **A second "Open with" on a running app stacked a second activity.** `MainActivity` had
    no `launchMode`, so the `standard` default started a *new* instance (the document did
    open, but the old editor — possibly the expired one — stayed underneath in the task). It
-   is now `singleTop`, and `onNewIntent` hands the document to the running composition, which
-   replaces the stack exactly as a cold "Open with" launch does. The controller stays inside
-   the composition: a `NavHostController` built by hand would lose its saved back stack on
-   process death.
+   is now `singleTop`, and `onNewIntent` hands the document to the running composition. The
+   controller stays inside the composition: a `NavHostController` built by hand would lose
+   its saved back stack on process death. **Superseded by ADR 0003 (Phase 3):** the document
+   is *pushed on top* rather than popped back to the start destination, because replacing the
+   stack silently discarded the unsaved edits of the editor below. Back returns to that
+   editor, which keeps its state (an expired one offers Retry and Back to files).
 
 Not claimed: none of this was reproduced on a device `[not-verified]`. The unit tests pin
 the classification and the grant logic against a faked resolver

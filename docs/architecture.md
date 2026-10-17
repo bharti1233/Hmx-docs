@@ -36,6 +36,8 @@ Settings (from the browser)
 ```
 
 External "Open with" intents bypass FileBrowser and land directly on the correct editor.
+A second one while the app is running is pushed on top of the stack rather than replacing
+it, so the editor already open keeps its ViewModel and its unsaved edits (ADR 0003).
 
 ## File access model
 
@@ -65,7 +67,12 @@ crashing. See [src/pdf-bridge/README.md](../src/pdf-bridge/README.md).
 2. `IntentHandler` resolves the MIME type, picks the editor, and passes the URI.
 3. The editor opens the file (via SAF URI or direct path) and loads it into memory.
 4. Compose renders the editable state.
-5. On save, the editor writes back to the original URI/path.
+5. On save, the editor writes back to the original URI/path. The replacement is
+   serialized in full and checked for package integrity before the destination is
+   touched; a local file is replaced by renaming a complete temporary file over it, a
+   provider file by a guarded write that keeps the previous content as a rollback copy.
+   One save runs per document at a time, and only the revision that was written clears
+   the dirty state. Details, guarantees and limits: [decisions/0003](decisions/0003-safe-save.md).
 
 ## Build and CI
 

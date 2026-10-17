@@ -1,5 +1,6 @@
 package dev.kern.editors.word
 
+import dev.kern.shared.io.DocumentIo
 import org.apache.poi.util.Units
 import org.apache.poi.wp.usermodel.HeaderFooterType
 import org.apache.poi.xwpf.usermodel.Document
@@ -11,6 +12,7 @@ import org.apache.poi.xwpf.usermodel.XWPFParagraph
 import org.apache.poi.xwpf.usermodel.XWPFRun
 import org.apache.poi.xwpf.usermodel.XWPFTable
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Ignore
@@ -559,6 +561,119 @@ class WordPreservationTest {
         val bytes = docx { doc -> doc.createParagraph().createRun().setText("x2") }
         val after = WordDocument.applyEditsAndSerialize(bytes, mapOf(0 to listOf(WordDocument.Run("x3"))))
         assertTrue(part(after, "word/document.xml").contains("<w:vertAlign"))
+    }
+
+    // ---- save safety --------------------------------------------------------
+
+    @Test
+    fun saving_producesAPackageThatReadsBackWithTheEditAndItsUnrelatedContent() {
+        // A save is only real if the result can be read again: the check the editors run
+        // before replacing the file, then a reopen of what the check accepted.
+        val bytes = mixed()
+        val index = blockIndex(bytes, "Tail")
+        val before = snapshot(bytes)
+        val saved = WordDocument.applyEditsAndSerialize(bytes, mapOf(index to listOf(WordDocument.Run("Edited tail"))))
+
+        assertTrue("the serializer's own output passes the save check", DocumentIo.verifyZipPackage(saved))
+        assertEquals("the edit is in the reopened document", "Edited tail", textOf(saved, index))
+        val after = snapshot(saved)
+        assertEquals("headers survive", before.headers, after.headers)
+        assertEquals("footers survive", before.footers, after.footers)
+        assertEquals(
+            "the table, the field and the numbering survive",
+            before.blocks.filter { it.startsWith("tbl(") || it.contains("fld(") || it.contains("num(") },
+            after.blocks.filter { it.startsWith("tbl(") || it.contains("fld(") || it.contains("num(") },
+        )
+    }
+
+    @Test
+    fun saving_keepsImageRelationshipsResolvable() {
+        val bytes = withImages()
+        val before = snapshot(bytes)
+        val index = blockIndex(bytes, "After pictures")
+        val saved = WordDocument.applyEditsAndSerialize(bytes, mapOf(index to listOf(WordDocument.Run("Edited after pictures"))))
+
+        assertEquals("every picture is still referenced", before.pictures, snapshot(saved).pictures)
+        assertTrue(
+            "the relationships the pictures point at are still in the package",
+            part(saved, "word/_rels/document.xml.rels").contains("media/"),
+        )
+    }
+
+    @Test
+    fun saveCheckRefusesATruncatedSerialization() {
+        // Item 17 of the Phase 3 test list: an incomplete package must never be reported as
+        // a successful save. The editors pass the check before opening the destination.
+        val bytes = plain()
+        val index = blockIndex(bytes, "Second line")
+        val saved = WordDocument.applyEditsAndSerialize(bytes, mapOf(index to listOf(WordDocument.Run("Edited line"))))
+
+        assertFalse("half a document must not replace the file", DocumentIo.verifyZipPackage(saved.copyOf(saved.size / 2)))
+        assertTrue("the complete one is accepted", DocumentIo.verifyZipPackage(saved))
+    }
+
+    @Test
+    fun undoRedo_keepsUnrelatedContentOfEveryFixture() {
+        // An edit, its undo, and its redo each go through the serializer. Table structure,
+        // hyperlink targets and picture relationships must be identical in all three.
+        for ((name, bytes) in listOf(
+            "table" to withTable(),
+            "hyperlink" to withHyperlink(),
+            "images" to withImages(),
+        )) {
+            val before = snapshot(bytes)
+            val read = WordDocument.read(bytes)
+            val index = read.blocks.indexOfLast { it is WordDocument.ParagraphBlock && it.text.isNotEmpty() }
+            check(index >= 0) { "no editable paragraph in the $name fixture" }
+            val original = textOf(bytes, index)
+            val edit = mapOf(index to listOf(WordDocument.Run("Edited")))
+
+            val undone = WordDocument.applyEditsAndSerialize(bytes)
+            val redone = WordDocument.applyEditsAndSerialize(bytes, edit)
+
+            for ((step, result) in listOf("undo" to undone, "redo" to redone)) {
+                val after = snapshot(result)
+                assertEquals("$name/$step: pictures", before.pictures, after.pictures)
+                assertEquals("$name/$step: headers", before.headers, after.headers)
+                assertEquals("$name/$step: footers", before.footers, after.footers)
+                assertEquals(
+                    "$name/$step: tables and hyperlinks",
+                    before.blocks.filter { it.startsWith("tbl(") || it.contains("lnk(") },
+                    after.blocks.filter { it.startsWith("tbl(") || it.contains("lnk(") },
+                )
+            }
+            assertEquals("$name: undo keeps the paragraph as it was", original, textOf(undone, index))
+            assertEquals("$name: redo reapplies the edit", "Edited", textOf(redone, index))
+        }
+    }
+
+    @Test
+    fun serializerLeavesTheCapturedSnapshotUntouched() {
+        // A save works from the maps captured when it started. If serialization mutated
+        // them, an edit arriving during the save could change what is written mid-flight,
+        // and the editors' "was the written revision still the current one?" comparison.
+        val bytes = withTable()
+        val paragraph = blockIndex(bytes, "Before table")
+        val table = tableBlockIndex(bytes)
+        val edits = mutableMapOf(paragraph to listOf(WordDocument.Run("Edited")))
+        val props = mutableMapOf<Int, WordDocument.ParaPropsUpdate>()
+        val tables = mutableMapOf(table to listOf(listOf("A1", "B1"), listOf("A2", "B2")))
+
+        val saved = WordDocument.applyEditsAndSerialize(bytes, edits, props, tables)
+
+        assertEquals("the edit map is unchanged", listOf(WordDocument.Run("Edited")), edits[paragraph])
+        assertEquals("no entry is added to the edit map", 1, edits.size)
+        assertTrue("no property entry is added", props.isEmpty())
+        assertEquals(
+            "the table grid is unchanged",
+            listOf(listOf("A1", "B1"), listOf("A2", "B2")),
+            tables[table],
+        )
+        assertEquals("the edit reached the document", "Edited", textOf(saved, paragraph))
+        assertTrue(
+            "the table edit reached the document",
+            snapshot(saved).blocks.any { it.contains("tbl(A1|B1;A2|B2)") },
+        )
     }
 
     private companion object {

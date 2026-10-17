@@ -137,42 +137,72 @@ environment `[inference]`.
   loses access at reboot; the fix there is the error message and the way back to the
   file list, not longer access.
 - Unsaved edits live in the editor's memory only, so a process death *while editing* loses
-  them: there is no draft/journal yet (roadmap Phase 3). Access expiring mid-session does
+  them: there is no draft/journal yet (roadmap Phase 4). Access expiring mid-session does
   not lose them — a failed save keeps the document, the edits and the Export path in place,
   and `src/shared/ui/UnsavedChangesGuard.kt` still stands between the edits and a back press.
+  A second "Open with" no longer replaces the editor either, so it cannot discard them
+  (ADR 0003).
+- Provider saves are not atomic: the platform has no replace-document operation for a
+  `content://` target, so a kill or an OOM *during* the write can still leave a damaged file
+  even though the save is reported as failed — the rollback only runs while the process
+  lives. Local `file://` saves are replaced by an atomic rename instead (ADR 0003). `[code]`
+- The pre-write check is package-level, not semantic: it catches output that is truncated or
+  unopenable, and the stored file is not re-read after a successful write, so a provider that
+  keeps less than it was handed is not detected. `[docs]`
 - The failure classification and the retry decision are unit-tested against a faked resolver
   (`tests/shared/DocumentIoTest.kt`). Which exception a real provider throws for a revoked
   grant, and what a device shows after a force-stop, is device work (§8) `[not-verified]`.
 
 ## 6. Safe save and recovery
 
-- **Single guarded write.** The document is serialized in full in memory first;
-  `DocumentIo.writeBytes` then keeps the previous bytes and writes once. If the write
-  throws part-way (revoked access, provider error, full disk), the previous content is
-  written back and the *original* failure is rethrown, so a failed save can never be
-  reported as success (`DocumentIo.kt:93-107`). There is no atomic replace in SAF, so
-  this rollback is the strongest available guarantee `[docs]`; if the rollback also
-  fails, the failure is logged and the user is told the save failed.
-- **Nothing is written before the new bytes exist** — no partial serialization ever
-  reaches the provider `[code]` (the document is materialised in memory by design,
-  ADR 003).
+- **Serialize, check, then replace.** The document is serialized in full in memory first
+  (`XxxDocument.applyEditsAndSerialize`), the resulting package is checked for integrity
+  (`DocumentIo.verifyZipPackage`: it has entries, every entry inflates to its end, and the
+  end-of-central-directory record is present), and only then is the destination touched. A
+  rejected replacement throws before anything is opened and reads "The updated document
+  could not be written safely, so the file was left unchanged. Use Export to save a copy." —
+  the file keeps its last valid version (`DocumentIo.kt`, ADR 0003). Word, Excel, EPUB and
+  PPTX pass this check; CSV is plain text and does not.
+- **Local files are replaced by rename.** A `file://` document (what the in-app browser
+  opens) goes through `DocumentIo.replaceFileAtomically`: the new content is written to a
+  temporary file in the same directory, flushed to storage, and renamed over the document. A
+  failure anywhere leaves the previous file in place, and no second full copy is held in
+  memory for a rollback.
+- **Provider writes keep a rollback copy.** There is no atomic replace for `content://`, so
+  the previous content is read first and written back if the write throws, and the *original*
+  failure is rethrown, so a failed save is never reported as success. When the previous
+  content cannot be read, that is logged instead of silently skipped; if the rollback also
+  fails, the failure is logged and the user is told (`DocumentIo.kt`).
+- **One save at a time, and only the written revision clears dirty.** Every editor refuses a
+  second save while one runs, the chrome reads "Saving…" and disables Save during it, and the
+  dirty state is cleared only when the snapshots that were written still match the editor's
+  (`save`/`snapshotForSave` in each `*EditorViewModel.kt`). EPUB keeps edits made during a
+  save in its edit map instead of clearing the whole map.
+- **Word parses the document once per save** (`WordDocument.readDocument` resolves the block
+  indices on the document being edited), instead of reading the package a second time just to
+  map blocks to body elements.
+- **A second "Open with" no longer discards edits.** The document is pushed on top of the
+  stack (`MainActivity.kt`), so the editor below keeps its ViewModel and its unsaved edits;
+  back returns to it (ADR 0003, superseding the replacement behaviour described in ADR 0002).
+- **Nothing is written before the new bytes exist** — the document is materialised in memory
+  by design (ADR 003).
 - **Failure text.** Load: revoked grant / denial while a grant is still held / file moved
   or deleted / all-files access turned off / provider failure / the editor's own fallback.
-  Save: "This file can't be changed. Use Export to save a copy." for permission failures.
-  Provider names, PIDs, URIs and paths never reach the user (`DocumentIo.kt:228-253`,
-  asserted by tests).
+  Save: "This file can't be changed. Use Export to save a copy." for permission failures,
+  and the "left unchanged" wording above for a replacement that failed its check. Provider
+  names, PIDs, URIs and paths never reach the user (`DocumentIo.kt`, asserted by tests).
 - **Recovery affordance.** A load failure offers "Try again" — one read per tap, shown only
   when a second read could fix the failure, never for a document that is gone — beside
-  "Back to files" (`src/shared/ui/EditorChrome.kt:119-130`,
-  `src/shared/ui/GridEditorScreen.kt:208-219`). Reselecting through the picker renews the
-  grant; reopening the same document from the in-app browser needs no grant at all, because
-  it is read as a file. Nothing retries on its own: no resume-triggered loop, and a second
-  tap while a read is in flight is ignored. No draft/journal file is written: the app never
-  copies documents into private storage (ADR 003), so there is nothing to recover *from* —
-  and the guarded write means the file on disk is either the old or the new revision.
-- **Not covered:** a crash *between* the write and the provider's commit, and
-  providers that implement a partial write without throwing. Both need device tests
-  (§8) `[not-verified]`.
+  "Back to files" (`src/shared/ui/EditorChrome.kt`, `src/shared/ui/GridEditorScreen.kt`).
+  Reselecting through the picker renews the grant; reopening the same document from the
+  in-app browser needs no grant at all, because it is read as a file. Nothing retries on its
+  own: no resume-triggered loop, and a second tap while a read is in flight is ignored. No
+  draft/journal file is written: the app never copies documents into private storage
+  (ADR 003), so there is nothing to recover *from*.
+- **Not covered:** a crash *between* the write and the provider's commit, a provider that
+  implements a partial write without throwing, and the stored file not being re-read after
+  the write (the check runs on the bytes before it). A draft/journal for a process death
+  while editing is roadmap Phase 4 work. All of it needs device tests (§8) `[not-verified]`.
 
 ## 7. Verification
 
@@ -260,8 +290,9 @@ files for the round-trip cases.
 16. **Reselect and recover.** From that state: (a) tap "Back to files" and open the same
     document again through the picker; and (b) open the same document from Files with
     "Open with" while the app is still running. *Expected:* both show the current content on
-    disk and saving works again; (b) must not stack a second app instance, and back must not
-    land on the expired editor.
+    disk and saving works again; (b) must not stack a second app instance, and back returns
+    to the editor that was open before (which keeps its state; the expired one stays
+    recoverable through "Try again" / "Back to files").
 17. **Try again.** In the failure state, tap "Try again" while the document is still
     unreachable. *Expected:* one more attempt and then the same message — no self-retrying
     loop, no endless spinner. For a failure a second read cannot fix (a deleted document)
@@ -270,11 +301,30 @@ files for the round-trip cases.
     (step 5), then rotate the device and use Export. *Expected:* the edits are still in the
     editor after rotation, the exported copy contains them, and a back press still asks
     before discarding them. (A *process* death during editing is the one loss this phase
-    does not prevent — roadmap Phase 3.)
+    does not prevent — roadmap Phase 4.)
+19. **Save while saving.** Edit a large document and tap Save twice in quick succession, or
+    tap Save and keep typing. *Expected:* the second tap does not start a second write; the
+    subtitle reads "Saving…" and Save is disabled while the write runs; if the typing landed
+    after the save started, the editor still shows "● Unsaved changes" when it finishes and
+    a second Save stores that text.
+20. **Local file replace.** Edit and save a document opened from the in-app browser (a
+    `file://` path under Documents/Downloads), then kill the app right after the save.
+    *Expected:* the file opens in Word/Docs with the edit, and no `.tmp` file is left beside
+    it.
+21. **Failed save keeps the file.** Edit a cloud document, turn airplane mode on, save, then
+    reopen the file after reconnecting. *Expected:* a save-failed dialog; the file on the
+    provider still holds the previous content (nothing half-written), and Export still
+    writes the edited copy.
+22. **Undo/redo then save state.** Edit, save, undo the edit, save again. *Expected:* the
+    file matches what the editor shows after each save, and unrelated content is unchanged.
+23. **Two documents in a row via "Open with".** Edit a document without saving, then open a
+    second document from Files with "Open with". *Expected:* the second opens on top; back
+    returns to the first with its unsaved edits still there (Phase 3 change, ADR 0003).
 
-Steps 4, 5 and 12 are the ones this phase's changes are meant to alter; steps 15–18 cover
-the follow-up fixes; steps 6–11 are the ones the new suite predicts and a device must
-confirm. A device is the only place any of them can be settled.
+Steps 4, 5 and 12 are the ones Phase 2's changes were meant to alter; steps 15–18 cover the
+access-recovery follow-up; steps 19–23 cover the Phase 3 save-safety changes; steps 6–11 are
+the ones the preservation suite predicts and a device must confirm. A device is the only
+place any of them can be settled.
 
 ## 9. Out of scope for this phase
 

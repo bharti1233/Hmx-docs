@@ -117,42 +117,48 @@ object WordDocument {
      */
     data class Parsed(val blocks: List<Block>, val elementIndices: List<Int>)
 
-    fun read(bytes: ByteArray): Parsed {
-        XWPFDocument(ByteArrayInputStream(bytes)).use { doc ->
-            val blocks = ArrayList<Block>()
-            val elementIndices = ArrayList<Int>()
-            doc.bodyElements.forEachIndexed { elementIndex, element ->
-                when (element) {
-                    is XWPFParagraph -> {
-                        val images = extractPictures(element)
-                        images.forEach {
-                            blocks.add(it)
-                            elementIndices.add(elementIndex)
-                        }
-                        val para = readParagraph(element, doc)
-                        // A paragraph that only carries pictures has no text to edit, so it
-                        // does not get an editable block of its own.
-                        if (para.text.isNotEmpty() || images.isEmpty()) {
-                            blocks.add(para)
-                            elementIndices.add(elementIndex)
-                        }
-                    }
-                    is XWPFTable -> {
-                        blocks.add(readTable(element))
+    fun read(bytes: ByteArray): Parsed =
+        XWPFDocument(ByteArrayInputStream(bytes)).use { readDocument(it) }
+
+    /**
+     * The block layout of an already open document, with the body-element index of every
+     * block. [applyEditsAndSerialize] resolves its block indices through this on the same
+     * document it is about to edit, so a save parses the package once instead of twice.
+     */
+    internal fun readDocument(doc: XWPFDocument): Parsed {
+        val blocks = ArrayList<Block>()
+        val elementIndices = ArrayList<Int>()
+        doc.bodyElements.forEachIndexed { elementIndex, element ->
+            when (element) {
+                is XWPFParagraph -> {
+                    val images = extractPictures(element)
+                    images.forEach {
+                        blocks.add(it)
                         elementIndices.add(elementIndex)
                     }
-                    else -> {
-                        blocks.add(OpaqueBlock)
+                    val para = readParagraph(element, doc)
+                    // A paragraph that only carries pictures has no text to edit, so it
+                    // does not get an editable block of its own.
+                    if (para.text.isNotEmpty() || images.isEmpty()) {
+                        blocks.add(para)
                         elementIndices.add(elementIndex)
                     }
                 }
+                is XWPFTable -> {
+                    blocks.add(readTable(element))
+                    elementIndices.add(elementIndex)
+                }
+                else -> {
+                    blocks.add(OpaqueBlock)
+                    elementIndices.add(elementIndex)
+                }
             }
-            if (blocks.isEmpty()) {
-                blocks.add(ParagraphBlock(ParaProps(), listOf(Run("")), editable = true))
-                elementIndices.add(UNMAPPED)
-            }
-            return Parsed(blocks, elementIndices)
         }
+        if (blocks.isEmpty()) {
+            blocks.add(ParagraphBlock(ParaProps(), listOf(Run("")), editable = true))
+            elementIndices.add(UNMAPPED)
+        }
+        return Parsed(blocks, elementIndices)
     }
 
     /**
@@ -166,8 +172,9 @@ object WordDocument {
     ): ByteArray {
         // Resolve every block index through the layout read() produced: pictures and
         // unmodelled elements add or reorder blocks, so a block index is not a body index.
-        val elementIndices = read(originalBytes).elementIndices
+        // Both come from the same parse, which is also the only one this save does.
         XWPFDocument(ByteArrayInputStream(originalBytes)).use { doc ->
+            val elementIndices = readDocument(doc).elementIndices
             val elements = doc.bodyElements
 
             // Apply paragraph run edits and property changes

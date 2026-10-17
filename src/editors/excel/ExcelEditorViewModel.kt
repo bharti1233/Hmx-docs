@@ -31,6 +31,11 @@ class ExcelEditorViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var dirty by mutableStateOf(false)
         private set
+
+    /** True while a save of this document is running; a second save is refused meanwhile. */
+    var saving by mutableStateOf(false)
+        private set
+
     var error by mutableStateOf<String?>(null)
         private set
 
@@ -244,24 +249,57 @@ class ExcelEditorViewModel(app: Application) : AndroidViewModel(app) {
 
     fun save(onResult: (ok: Boolean, message: String?) -> Unit) {
         val target = uri ?: run { onResult(false, "Nothing to save."); return }
-        write(target) { ok, msg ->
-            if (ok) dirty = false
+        if (saving) { onResult(false, "A save is already running."); return }
+        val written = snapshotForSave()
+        saving = true
+        write(target, written) { ok, msg ->
+            saving = false
+            // Only the revision that was written may clear the flag: edits made while the
+            // save ran are still unsaved.
+            if (ok && snapshotForSave() == written) dirty = false
             onResult(ok, msg)
         }
     }
 
-    fun exportTo(target: Uri, onResult: (ok: Boolean, message: String?) -> Unit) = write(target, onResult)
+    fun exportTo(target: Uri, onResult: (ok: Boolean, message: String?) -> Unit) =
+        write(target, snapshotForSave(), onResult)
 
-    private fun write(target: Uri, onResult: (ok: Boolean, message: String?) -> Unit) {
+    /** Everything one save serializes, captured together so a later edit cannot leak into it. */
+    private data class SaveInput(
+        val edits: Map<Triple<Int, Int, Int>, String>,
+        val structuralOps: List<ExcelDocument.StructuralOp>,
+        val colWidths: Map<Pair<Int, Int>, Float>,
+        val rowHeights: Map<Pair<Int, Int>, Float>,
+    )
+
+    private fun snapshotForSave() = SaveInput(
+        edits = edits.toMap(),
+        structuralOps = structuralOps.toList(),
+        colWidths = colWidthEdits.toMap(),
+        rowHeights = rowHeightEdits.toMap(),
+    )
+
+    private fun write(
+        target: Uri,
+        input: SaveInput,
+        onResult: (ok: Boolean, message: String?) -> Unit,
+    ) {
         val ctx = getApplication<Application>()
         val bytes = originalBytes ?: run { onResult(false, "Nothing to save."); return }
-        val snapshot = edits.toMap()
-        val ops = structuralOps.toList()
-        val cwSnapshot = colWidthEdits.toMap()
-        val rhSnapshot = rowHeightEdits.toMap()
         viewModelScope.launch {
             val result = withContext(Dispatchers.IO) {
-                runCatching { DocumentIo.writeBytes(ctx, target, ExcelDocument.applyEditsAndSerialize(bytes, snapshot, ops, cwSnapshot, rhSnapshot)) }
+                runCatching {
+                    val serialized = ExcelDocument.applyEditsAndSerialize(
+                        originalBytes = bytes,
+                        edits = input.edits,
+                        structuralOps = input.structuralOps,
+                        colWidths = input.colWidths,
+                        rowHeights = input.rowHeights,
+                    )
+                    // Checked before the destination is opened: a package that would not
+                    // read back never replaces the document on disk.
+                    DocumentIo.writeBytes(ctx, target, serialized, DocumentIo::verifyZipPackage)
+                }
             }
             onResult(result.isSuccess, DocumentIo.saveError(result.exceptionOrNull(), "Could not save the document. Use Export to save a copy."))
         }

@@ -34,6 +34,10 @@ class EpubEditorViewModel(app: Application) : AndroidViewModel(app) {
     var canRetry by mutableStateOf(false)
         private set
 
+    /** True while a save of this document is running; a second save is refused meanwhile. */
+    var saving by mutableStateOf(false)
+        private set
+
     var currentChapter by mutableIntStateOf(0)
         private set
 
@@ -122,21 +126,38 @@ class EpubEditorViewModel(app: Application) : AndroidViewModel(app) {
 
     fun save(onResult: (ok: Boolean, message: String?) -> Unit) {
         val target = uri ?: run { onResult(false, "Nothing to save."); return }
-        write(target) { ok, msg ->
-            if (ok) edits.clear()
+        if (saving) { onResult(false, "A save is already running."); return }
+        val written = snapshotOfEdits()
+        saving = true
+        write(target, written) { ok, msg ->
+            saving = false
+            // An edit made while the save ran is not in the file yet: clearing the whole
+            // map here would drop it, so only the revision that was written is dropped.
+            if (ok && snapshotOfEdits() == written) edits.clear()
             onResult(ok, msg)
         }
     }
 
-    fun exportTo(target: Uri, onResult: (ok: Boolean, message: String?) -> Unit) = write(target, onResult)
+    fun exportTo(target: Uri, onResult: (ok: Boolean, message: String?) -> Unit) =
+        write(target, snapshotOfEdits(), onResult)
 
-    private fun write(target: Uri, onResult: (ok: Boolean, message: String?) -> Unit) {
+    private fun snapshotOfEdits(): Map<Pair<Int, Int>, String> = edits.toMap()
+
+    private fun write(
+        target: Uri,
+        snapshot: Map<Pair<Int, Int>, String>,
+        onResult: (ok: Boolean, message: String?) -> Unit,
+    ) {
         val ctx = getApplication<Application>()
         val bytes = originalBytes ?: run { onResult(false, "Nothing to save."); return }
-        val snapshot = edits.toMap()
         viewModelScope.launch {
             val result = withContext(Dispatchers.IO) {
-                runCatching { DocumentIo.writeBytes(ctx, target, EpubDocument.applyEditsAndSerialize(bytes, snapshot)) }
+                runCatching {
+                    val serialized = EpubDocument.applyEditsAndSerialize(bytes, snapshot)
+                    // Checked before the destination is opened: a package that would not
+                    // read back never replaces the document on disk.
+                    DocumentIo.writeBytes(ctx, target, serialized, DocumentIo::verifyZipPackage)
+                }
             }
             onResult(result.isSuccess, DocumentIo.saveError(result.exceptionOrNull(), "Could not save the document. Use Export to save a copy."))
         }

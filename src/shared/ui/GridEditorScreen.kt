@@ -116,6 +116,8 @@ fun spreadsheetColumnLabel(index: Int): String {
  *
  * @param onRetry offered in the error state when another read could succeed (access
  *        renewed, provider recovered); null when the failure is not worth retrying.
+ * @param saving true while a save is running: the state reads "Saving…" and Save is
+ *        disabled, so a second tap cannot start a second write over the same document.
  * @param onSave invoked with a result callback (success via snackbar, error via dialog).
  * @param onExportToUri invoked with the chosen Save-as URI and a result callback.
  */
@@ -134,6 +136,7 @@ fun GridEditorScreen(
     selectedValue: String,
     onSelect: (row: Int, col: Int) -> Unit,
     onEditSelected: (String) -> Unit,
+    saving: Boolean = false,
     onSave: (onResult: (Boolean, String?) -> Unit) -> Unit,
     exportMimeType: String,
     exportFileName: String,
@@ -177,8 +180,14 @@ fun GridEditorScreen(
                 title = title,
                 monoTitle = true,
                 formatColor = hue,
-                subtitle = if (dirty) "● Unsaved changes" else "Saved · on-device",
-                subtitleColor = if (dirty) KernTheme.colors.accent else null,
+                // Never "Saved" before the write finished, and never the unsaved marker while
+                // the write it reports on is still running.
+                subtitle = when {
+                    saving -> "Saving…"
+                    dirty -> "● Unsaved changes"
+                    else -> "Saved · on-device"
+                },
+                subtitleColor = if (dirty && !saving) KernTheme.colors.accent else null,
                 onBack = { backDispatcher?.onBackPressed() },
                 actions = {
                     KernIconButton(
@@ -190,8 +199,8 @@ fun GridEditorScreen(
                                 else errorDialog = "Save failed" to (msg ?: "This file is read-only. Use Export to save a copy.")
                             }
                         },
-                        enabled = dirty,
-                        tint = if (dirty) KernTheme.colors.accent else null,
+                        enabled = dirty && !saving,
+                        tint = if (dirty && !saving) KernTheme.colors.accent else null,
                     )
                     KernIconButton(KernIcons.Download, "Export a copy", onClick = { exportLauncher.launch(exportFileName) })
                 },

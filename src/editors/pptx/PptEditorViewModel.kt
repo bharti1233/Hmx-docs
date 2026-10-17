@@ -144,6 +144,11 @@ class PptEditorViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var dirty by mutableStateOf(false)
         private set
+
+    /** True while a save of this document is running; a second save is refused meanwhile. */
+    var saving by mutableStateOf(false)
+        private set
+
     var error by mutableStateOf<String?>(null)
         private set
 
@@ -624,18 +629,32 @@ class PptEditorViewModel(app: Application) : AndroidViewModel(app) {
 
     fun save(onResult: (ok: Boolean, message: String?) -> Unit) {
         val target = uri ?: run { onResult(false, "Nothing to save."); return }
-        write(target) { ok, msg ->
-            if (ok) dirty = false
+        if (saving) { onResult(false, "A save is already running."); return }
+        val written = snapshotForSave()
+        saving = true
+        write(target, written) { ok, msg ->
+            saving = false
+            // Only the revision that was written may clear the flag: edits made while the
+            // save ran are still unsaved.
+            if (ok && snapshotForSave() == written) dirty = false
             onResult(ok, msg)
         }
     }
 
-    fun exportTo(target: Uri, onResult: (ok: Boolean, message: String?) -> Unit) = write(target, onResult)
+    fun exportTo(target: Uri, onResult: (ok: Boolean, message: String?) -> Unit) =
+        write(target, snapshotForSave(), onResult)
 
-    private fun write(target: Uri, onResult: (ok: Boolean, message: String?) -> Unit) {
-        val ctx = getApplication<Application>()
-        val bytes = originalBytes ?: run { onResult(false, "Nothing to save."); return }
+    /** Everything one save serializes, captured together so a later edit cannot leak into it. */
+    private data class SaveInput(
+        val slideOps: List<PptDocument.SlideOp>,
+        val richEdits: Map<Pair<Int, Int>, List<PptDocument.ShapeRun>>,
+        val alignEdits: Map<Pair<Int, Int>, List<String?>>,
+        val boundsEdits: Map<Pair<Int, Int>, PptDocument.ShapeBounds>,
+        val decorationBoundsEdits: Map<Pair<Int, Int>, PptDocument.ShapeBounds>,
+        val anchorEdits: Map<Pair<Int, Int>, String>,
+    )
 
+    private fun snapshotForSave(): SaveInput {
         // Only what changed is written. Rewriting every shape would replace markup the
         // editor does not model with its own defaults, on shapes the user never touched.
         val richEdits = mutableMapOf<Pair<Int, Int>, List<PptDocument.ShapeRun>>()
@@ -657,20 +676,31 @@ class PptEditorViewModel(app: Application) : AndroidViewModel(app) {
                 if (decoration.boundsChanged) decorationBoundsEdits[sIdx to decorationIdx] = decoration.bounds
             }
         }
+        return SaveInput(slideOps.toList(), richEdits, alignEdits, boundsEdits, decorationBoundsEdits, anchorEdits)
+    }
 
+    private fun write(
+        target: Uri,
+        input: SaveInput,
+        onResult: (ok: Boolean, message: String?) -> Unit,
+    ) {
+        val ctx = getApplication<Application>()
+        val bytes = originalBytes ?: run { onResult(false, "Nothing to save."); return }
         viewModelScope.launch {
             val result = withContext(Dispatchers.IO) {
                 runCatching {
                     val serialized = PptDocument.applyEditsAndSerialize(
                         originalBytes = bytes,
-                        slideOps = slideOps.toList(),
-                        richEdits = richEdits,
-                        boundsEdits = boundsEdits,
-                        alignEdits = alignEdits,
-                        decorationBoundsEdits = decorationBoundsEdits,
-                        anchorEdits = anchorEdits,
+                        slideOps = input.slideOps,
+                        richEdits = input.richEdits,
+                        boundsEdits = input.boundsEdits,
+                        alignEdits = input.alignEdits,
+                        decorationBoundsEdits = input.decorationBoundsEdits,
+                        anchorEdits = input.anchorEdits,
                     )
-                    DocumentIo.writeBytes(ctx, target, serialized)
+                    // Checked before the destination is opened: a package that would not
+                    // read back never replaces the document on disk.
+                    DocumentIo.writeBytes(ctx, target, serialized, DocumentIo::verifyZipPackage)
                 }
             }
             onResult(result.isSuccess, DocumentIo.saveError(result.exceptionOrNull(), "Could not save the document. Use Export to save a copy."))

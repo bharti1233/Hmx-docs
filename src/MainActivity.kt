@@ -57,12 +57,11 @@ class MainActivity : ComponentActivity() {
                         LaunchedEffect(pendingDeepLink) {
                             val route = pendingDeepLink ?: return@LaunchedEffect
                             pendingDeepLink = null
-                            // The document becomes the only editor on the stack, exactly as when
-                            // it launched the app. That is also how a document whose access
-                            // expired gets opened again from the file list.
-                            navController.navigate(route) {
-                                popUpTo(navController.graph.startDestinationId) { inclusive = true }
-                            }
+                            // Pushed on top of the stack, not popped back to the start
+                            // destination: the editor already there keeps its ViewModel, so a
+                            // second "Open with" cannot silently discard its unsaved edits.
+                            // Back returns to it (see ADR 0003).
+                            navController.navigate(route)
                         }
                         KernNavHost(
                             startDestination = deepLink?.route ?: Destinations.BROWSER,
