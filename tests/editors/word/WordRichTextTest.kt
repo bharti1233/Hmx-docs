@@ -213,6 +213,18 @@ class WordRichTextTest {
         assertEquals(bold, WordRichText.styleAt(afterTap))
     }
 
+    /** Each toolbar toggle changes its own attribute and leaves the others alone. */
+    @Test
+    fun aSecondToolbarToggleKeepsTheFirstStyle() {
+        val bolded = WordRichText.restyleSelection(stored(run("hello", plain), selection = 0)) { it.copy(bold = true) }
+        val both = WordRichText.restyleSelection(bolded) { it.copy(italic = true) }
+        val coloured = WordRichText.restyleSelection(both) { it.copy(colorHex = "FF0000") }
+        assertEquals(
+            WordDocument.RunStyle(bold = true, italic = true, colorHex = "FF0000"),
+            onlyRun(coloured).style,
+        )
+    }
+
     // ---- toolbar formatting meets typing ------------------------------------
 
     /** Bold on a collapsed caret, then typing: the paragraph keeps the formatting. */

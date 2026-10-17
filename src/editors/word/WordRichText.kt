@@ -122,7 +122,8 @@ object WordRichText {
      *
      * One emission is one contiguous replacement: if an IME batches several unrelated edits
      * together, the text still comes out exactly right while the styles of the replaced
-     * middle take a single surrounding style.
+     * middle take a single surrounding style. (The PowerPoint editor merges its field values
+     * the same way — `PptRichText.mergeEdit`.)
      */
     fun editRuns(runs: List<WordDocument.Run>, newText: String): List<WordDocument.Run> {
         val old = runs.joinToString("") { it.text }

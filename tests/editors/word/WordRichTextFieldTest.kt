@@ -118,7 +118,7 @@ class WordRichTextFieldTest {
             caret = 9,
         )
         type("!")
-        assertEquals(10, state.value.text.length)
+        assertEquals("bold plain".length + 1, state.value.text.length)
         assertEquals(2, WordRichText.toRuns(state.value.annotatedString).size)
         assertTrue("the bold run is still bold", boldAt(state.value, state.value.text.indexOf('b')))
         assertFalse("the plain run is still plain", boldAt(state.value, state.value.text.indexOf('p')))
