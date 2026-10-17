@@ -236,6 +236,27 @@ environment `[inference]`.
     failed on two assertions, both test-side (a fixture that replaced a whole paragraph
     without carrying the link URL, and a fake writer that truncated during its rollback);
     fixed in `2187156` and `e239ca2`, with no product-code change.
+  - Phase 3 safe save (ADR 0003) for `189729e1f979b052b7f6480848af136f39ce52e7` — **observed**,
+    all green: [Android CI 39016588759](https://github.com/bharti1233/Hmx-docs/actions/runs/39016588759)
+    and [Release build check 39016588775](https://github.com/bharti1233/Hmx-docs/actions/runs/39016588775):
+    - unit tests **89 tests, 0 failed, 0 errors, 1 skipped** in 10 suites (74 → 89:
+      `DocumentIoTest` 16 → 26, `WordPreservationTest` 21 → 26; the skipped test is still the
+      pre-existing `@Ignore` probe from §2 row 9). The new tests cover the integrity check
+      (complete / truncated / no central directory / garbage / empty), no write when the check
+      refuses, rollback on write and on flush failures, the atomic local replace (content
+      replaced, no temporary left, document untouched when refused), the new failure message,
+      and — on the Word side — a save that reopens with the edit and its unrelated content, a
+      truncation refusal, an undo/redo fixture loop and "serialization leaves the snapshot
+      untouched".
+    - lint **0 errors, 49 warnings** — unchanged.
+    - `Kern-debug.apk` sha256 `9aabd500c8fe66c3dd57e6227826aaacefeb280b3bede8ed0a996da008a2814c`.
+    - `Kern-release-unsigned.apk` sha256 `3f2a1aee33fcd34041d654b592740b1dee6bf15d17b65143fc78fe72057e6a6a`
+      (7,149,520 bytes); the workflow's "Verify the release APK is unsigned" and "Verify R8
+      actually ran" steps both succeeded, and the R8 reports (mapping/usage/configuration)
+      were produced.
+    - The first push of this change (`333fb69`) had a test-side literal type error in the new
+      zip helper (`byteArrayOf(0x50, …)` needs `.toByte()`); its runs were cancelled when the
+      follow-up push arrived, and `189729e1` carries the fix. No product-code change.
 - What CI cannot prove: device behaviour (the checklist in §8), a real provider's grant
   lifetime and write semantics, and the crash window between write and commit.
 

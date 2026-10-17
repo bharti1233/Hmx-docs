@@ -423,6 +423,27 @@ baseline report.
 
 **Current state:** Truncating in-place write (`DocumentIo.kt:36-43`); no backup; no atomicity; index-mapping defect; column-delete defect; undo-then-save rewrites the whole body; empty-document edits are silently dropped (`WordDocument.kt:122-124` vs `:142-144`).
 
+**Shipped (2026-10-17, `189729e1f979b052b7f6480848af136f39ce52e7`, `docs/decisions/0003-safe-save.md`):**
+the save pipeline was audited and the confirmed risks fixed — the serialized package is
+checked before any destination is opened (`DocumentIo.verifyZipPackage`; a refusal reads
+"left unchanged"), `file://` documents are replaced by a same-directory temporary file +
+`fd.sync()` + rename (no truncation window, and no rollback copy held in memory), a
+`content://` destination keeps the guarded write and now logs when no rollback copy could
+be read, every editor runs one save at a time and clears the dirty flag only while the
+snapshots it wrote are still the current ones (EPUB no longer clears its whole edit map
+after a save, which used to drop edits made during it), the chrome shows "Saving…" with
+Save disabled during a write, a second "Open with" pushes instead of replacing the stack
+(so a dirty editor below keeps its edits), and Word parses a document once per save.
+Regression tests: `DocumentIoTest` 16 → 26 and `WordPreservationTest` 21 → 26 (89 tests
+total, 0 failures, CI green). Work packages 3 and 4 shipped with Phase 2.
+
+**Still open from this phase:** the draft/recovery journal and `.bak` revisions (work
+package 2 — needs the storage decision from ADR 003); re-targeting `originalBytes` after a
+save (6); the full error taxonomy (7 — save and access failures are classified, encrypted
+`.doc`/OLE2 vs corrupt is not distinguished yet); delta-only edit tracking (5); and the
+crash-injection test and physical-device acceptance run, which are what the phase's own
+"do not proceed until" gate asks for.
+
 **Work packages:**
 1. Safe save: write to a sibling temp (same provider/dir), fsync where possible, then rename/commit through SAF (`openOutputStream` on the target only after the full byte patch is built); keep the previous revision as `.bak`/local draft where the provider allows; verify on both `file://` (rename via `File.renameTo` after `Files.move`-style replace) and `content://` (write-back only after successful full generation, feasible because the document is already materialised in memory).
 2. Draft/recovery: persist pending serialized bytes (or the original + edit patch) into app-private storage keyed by document URI + mtime; offer recovery on reopen.

@@ -130,3 +130,12 @@ editors kept their document in memory after a failed save, so Export stayed avai
   serialized document, edits that leave unrelated content intact through undo/redo, and
   a truncated package being refused.
 - Manual device checklist: `docs/docx-preservation.md` §8, steps 19-23.
+- CI — **observed**, green for `189729e1f979b052b7f6480848af136f39ce52e7`:
+  [Android CI 39016588759](https://github.com/bharti1233/Hmx-docs/actions/runs/39016588759)
+  (89 tests, 0 failures, 0 errors, 1 pre-existing skip; lint 0 errors, 49 warnings) and
+  [Release build check 39016588775](https://github.com/bharti1233/Hmx-docs/actions/runs/39016588775)
+  (`Kern-release-unsigned.apk` sha256
+  `3f2a1aee33fcd34041d654b592740b1dee6bf15d17b65143fc78fe72057e6a6a`; the workflow proves it
+  is unsigned and that R8 ran). No device run has been performed: the concurrency rules
+  above are code-reviewed, not device-verified `[not-verified]`. Details in
+  `docs/docx-preservation.md` §7.
