@@ -193,6 +193,15 @@ environment `[inference]`.
     - `Kern-debug.apk` sha256 `9d015ec3deb40f23fe739c8983603c530206db3a9c6a97834888ad1d6b3a9aee`.
     - `Kern-release-unsigned.apk` sha256 `a154f4e4b74694f3693de92ab4eed9af20c59ddb26213ca454c3821a48449221`;
       the job proves it is unsigned by requiring `apksigner` to **reject** it, and R8 ran.
+  - Access-classification follow-up for `c4a4ffc9afc091c8ddcf65106f0d40afaf00ce3e` — **observed**,
+    all green: [Android CI 39011723281](https://github.com/bharti1233/Hmx-docs/actions/runs/39011723281)
+    and [Release build check 39011723287](https://github.com/bharti1233/Hmx-docs/actions/runs/39011723287):
+    - unit tests **74 tests, 0 failed, 0 errors, 1 skipped** in 10 suites (71 → 74: the four
+      `loadError` tests became seven `loadFailure` tests for the new classification).
+    - lint **0 errors, 49 warnings** — unchanged again.
+    - `Kern-debug.apk` sha256 `62923b20267cdbef6120cb3dd79e543a1ac40b93ca03074ff7c124e92decf6ff`.
+    - `Kern-release-unsigned.apk` sha256 `3781edbfb8e009e9e3312c893b946d03542142232d3c901909b7ff9dde1d01e5`
+      (7,149,520 bytes); `apksigner` rejects it, and R8 reports were produced.
   - The first run of this change ([38935275639](https://github.com/bharti1233/Hmx-docs/actions/runs/38935275639))
     failed on two assertions, both test-side (a fixture that replaced a whole paragraph
     without carrying the link URL, and a fake writer that truncated during its rollback);
