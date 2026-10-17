@@ -57,6 +57,13 @@ android {
     lint {
         lintConfig = file("config/lint.xml")
     }
+    // The Compose field tests run on the JVM (Robolectric), so they read the app's real
+    // manifest and resources.
+    testOptions {
+        unitTests {
+            isIncludeAndroidResources = true
+        }
+    }
     packaging {
         resources {
             excludes += setOf(
@@ -91,6 +98,12 @@ dependencies {
     debugImplementation(libs.androidx.ui.tooling)
     debugImplementation(libs.androidx.ui.test.manifest)
     testImplementation(libs.junit)
+    // JVM Compose field tests: Robolectric supplies the Android runtime for the real text
+    // field, and ui-test drives it through the IME command path without an emulator.
+    testImplementation(libs.robolectric)
+    testImplementation(libs.androidx.junit)
+    testImplementation(platform(libs.androidx.compose.bom))
+    testImplementation(libs.androidx.ui.test.junit4)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
     androidTestImplementation(platform(libs.androidx.compose.bom))
