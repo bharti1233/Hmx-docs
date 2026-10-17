@@ -6,6 +6,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.AlertDialog
@@ -35,6 +36,8 @@ import kotlinx.coroutines.launch
  * and a content slot. Reused by the document and slide editors; the host wires its
  * ViewModel via callbacks.
  *
+ * @param onRetry offered in the error state when another read could succeed (access
+ *        renewed, provider recovered); null when the failure is not worth retrying.
  * @param hue the file-format identity colour (title square, save-state).
  * @param toolbar optional bottom toolbar (e.g. an [EditorToolbar]).
  * @param content rendered only once loaded; receives a Modifier carrying the
@@ -47,6 +50,7 @@ fun EditorChrome(
     dirty: Boolean,
     loading: Boolean,
     error: String?,
+    onRetry: (() -> Unit)? = null,
     hue: Color,
     onSave: (onResult: (Boolean, String?) -> Unit) -> Unit,
     exportMimeType: String,
@@ -113,11 +117,15 @@ fun EditorChrome(
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
                     Text(text = error, color = colors.danger)
-                    // A load failure usually means the file could not be opened at all (an
-                    // expired picker grant, or the file was moved) — and a save cannot happen
-                    // because nothing is loaded, so the way forward is picking it again.
-                    TextButton(onClick = { backDispatcher?.onBackPressed() }) {
-                        Text("Back to files", color = colors.accent)
+                    // A failed load leaves no document to save, so the way forward is another
+                    // read (when it could succeed) or picking the file again.
+                    Row {
+                        onRetry?.let { retry ->
+                            TextButton(onClick = retry) { Text("Try again", color = colors.accent) }
+                        }
+                        TextButton(onClick = { backDispatcher?.onBackPressed() }) {
+                            Text("Back to files", color = colors.accent)
+                        }
                     }
                 }
                 else -> content(Modifier.fillMaxSize())

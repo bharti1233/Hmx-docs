@@ -146,6 +146,11 @@ class PptEditorViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var error by mutableStateOf<String?>(null)
         private set
+
+    /** True when the failure in [error] is worth another read via [retry]. */
+    var canRetry by mutableStateOf(false)
+        private set
+
     var currentSlide by mutableIntStateOf(0)
         private set
     var selectedShapeIndex by mutableStateOf<Int?>(null)
@@ -216,20 +221,37 @@ class PptEditorViewModel(app: Application) : AndroidViewModel(app) {
     fun start(encodedUri: String?) {
         if (started) return
         started = true
-        val ctx = getApplication<Application>()
-        val decoded = encodedUri?.takeIf { it.isNotBlank() }?.let { Uri.parse(Uri.decode(it)) }
+        // The navigation graph decodes this route argument once already (the route
+        // builders encode), so decoding again here would corrupt URIs whose IDs carry
+        // escapes of their own.
+        val decoded = encodedUri?.takeIf { it.isNotBlank() }?.let { Uri.parse(it) }
         if (decoded == null) {
             loading = false
             error = "No file was provided."
             return
         }
         uri = decoded
+        load(decoded)
+    }
+
+    /** Re-reads the document on the user's say-so: after access was renewed, or a provider recovered. */
+    fun retry() {
+        val target = uri ?: return
+        if (loading || error == null) return
+        error = null
+        canRetry = false
+        loading = true
+        load(target)
+    }
+
+    private fun load(target: Uri) {
+        val ctx = getApplication<Application>()
         viewModelScope.launch {
             val result = withContext(Dispatchers.IO) {
                 runCatching {
-                    DocumentIo.persistAccess(ctx, decoded)
-                    val bytes = DocumentIo.readBytes(ctx, decoded)
-                    Triple(DocumentIo.displayName(ctx, decoded), bytes, PptDocument.read(bytes))
+                    DocumentIo.persistAccess(ctx, target)
+                    val bytes = DocumentIo.readBytes(ctx, target)
+                    Triple(DocumentIo.displayName(ctx, target), bytes, PptDocument.read(bytes))
                 }
             }
             result.onSuccess { (name, bytes, parsed) ->
@@ -263,8 +285,14 @@ class PptEditorViewModel(app: Application) : AndroidViewModel(app) {
                 currentSlide = 0
                 selectedShapeIndex = null
                 loading = false
-            }.onFailure {
-                error = DocumentIo.loadError(it, "Could not open the presentation.")
+            }.onFailure { failure ->
+                val problem = DocumentIo.loadFailure(
+                    failure,
+                    "Could not open the presentation.",
+                    DocumentIo.persistedAccess(ctx, target).contains(DocumentIo.UriAccess.READ),
+                )
+                error = problem.message
+                canRetry = problem.canRetry
                 loading = false
             }
         }

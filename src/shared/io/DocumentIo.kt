@@ -20,12 +20,21 @@ import java.io.IOException
  * Access lifetime: the grant the picker or "Open with" hands over is transient — the
  * platform drops it when the device restarts — so [persistAccess] takes the persistable
  * grant the provider offers. Failures are reported in words the user can act on
- * ([loadError] / [saveError]) rather than the raw platform exception text, which names
+ * ([loadFailure] / [saveError]) rather than the raw platform exception text, which names
  * providers and PIDs the user has no use for.
  */
 object DocumentIo {
 
     private const val TAG = "DocumentIo"
+
+    /** No long-lived grant is held (or it was dropped): re-picking the file is the fix. */
+    private const val EXPIRED_ACCESS = "Access to this file has expired. Open it again to continue."
+
+    /** A provider that failed, stalled or refused a stream for a file it may still have. */
+    private const val PROVIDER_FAILURE = "The file could not be opened just now. Try again."
+
+    /** [readBytes]'s own text for a provider that returned no stream; classified as retryable. */
+    internal const val NO_STREAM = "Provider returned no input stream"
 
     /** Long-lived access modes for a document URI. */
     enum class UriAccess { READ, WRITE }
@@ -42,7 +51,7 @@ object DocumentIo {
         }
         return try {
             context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-                ?: throw FileNotFoundException("Provider returned no input stream")
+                ?: throw FileNotFoundException(NO_STREAM)
         } catch (failure: Throwable) {
             // Provider and failure kind only: no document name, path or content.
             Log.w(TAG, "Read failed (${failure.javaClass.simpleName}) from ${uri.authority}")
@@ -159,7 +168,7 @@ object DocumentIo {
      *
      * A SecurityException means there was no grant record to persist (a non-persistable
      * "Open with" hand-off, or a grant that already expired) — expected, and handled by
-     * the caller through [loadError] when the transient access is gone too.
+     * the caller through [loadFailure] when the transient access is gone too.
      */
     internal fun persistAccess(ops: GrantOps, uri: String): Set<UriAccess> {
         for (modes in listOf(setOf(UriAccess.READ), setOf(UriAccess.READ, UriAccess.WRITE))) {
@@ -194,20 +203,52 @@ object DocumentIo {
 
     // ---- User-facing failure text -------------------------------------------
 
+    /** Long-lived modes currently persisted for [uri]; empty when none are held. */
+    fun persistedAccess(context: Context, uri: Uri): Set<UriAccess> {
+        if (uri.scheme == "file") return setOf(UriAccess.READ, UriAccess.WRITE)
+        return ResolverGrants(context.contentResolver).persisted(uri.toString())
+    }
+
+    /** A failed load: what the user is told, and whether another read is worth offering. */
+    data class LoadFailure(val message: String, val canRetry: Boolean)
+
     /**
-     * A message for a failed document read. Never includes provider names, URIs or paths:
-     * the platform's own text ("Permission Denial: reading ... requires that you obtain
-     * access using ACTION_OPEN_DOCUMENT") tells the user nothing they can act on.
+     * Classifies a failed document read into a message and a retry decision.
+     *
+     * [readGrantHeld] is whether the app still holds a persisted READ grant for this URI
+     * (see [persistedAccess]). It separates a revoked grant from a provider that refused a
+     * read it was told to allow: calling the second one "your access expired" tells the user
+     * to fix a permission that was never broken, so the wording differs and only the cases a
+     * second read can fix offer one.
+     *
+     * No message includes provider names, URIs or paths: the platform's own text ("Permission
+     * Denial: reading ... requires that you obtain access using ACTION_OPEN_DOCUMENT") names
+     * things the user has no use for.
      */
-    fun loadError(failure: Throwable?, fallback: String): String = when (failure) {
-        is SecurityException -> "Access to this file has expired. Open it again to continue."
-        is FileNotFoundException ->
-            if (failure.message?.contains("EACCES") == true) {
-                "Files access is off. Turn it on in Settings to open this file."
-            } else {
-                "This file is no longer available. It may have been moved or deleted."
-            }
-        else -> fallback
+    fun loadFailure(
+        failure: Throwable?,
+        fallback: String,
+        readGrantHeld: Boolean = false,
+    ): LoadFailure = when {
+        failure is SecurityException && readGrantHeld -> LoadFailure(
+            "This file could not be opened just now, although the app still has permission for it. Try again, or open it again.",
+            canRetry = true,
+        )
+        failure is SecurityException -> LoadFailure(EXPIRED_ACCESS, canRetry = true)
+        failure is FileNotFoundException && failure.message?.contains("EACCES") == true ->
+            LoadFailure("Files access is off. Turn it on in Settings to open this file.", canRetry = true)
+        // Providers report a revoked read as a denial or as "not found", depending on the
+        // provider. Both mean the grant is gone, not that the document moved.
+        failure is FileNotFoundException && failure.message?.contains("Permission") == true ->
+            LoadFailure(EXPIRED_ACCESS, canRetry = true)
+        // A provider that died, stalled or held no stream for the document: the resolver
+        // reports it as an unopenable file. The document itself may be perfectly fine.
+        failure is FileNotFoundException &&
+            (failure.message == NO_STREAM || failure.message?.startsWith("Unable to open content") == true) ->
+            LoadFailure(PROVIDER_FAILURE, canRetry = true)
+        failure is FileNotFoundException ->
+            LoadFailure("This file is no longer available. It may have been moved or deleted.", canRetry = false)
+        else -> LoadFailure(fallback, canRetry = true)
     }
 
     /** A message for a failed document write; the wording matches the editors' save dialog. */

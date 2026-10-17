@@ -44,7 +44,7 @@ retained" means the content is not modelled by the editor but is not rewritten e
 | 10 | Field cached result text (`w:fldSimple`'s `w:r`) inside an edited field paragraph | The field structure is kept, its own text child is dropped, and the paragraph shows exactly the edited text. | Intentionally modified (no duplication) | Asserted (`editAFieldParagraph_keepsTheField`) |
 | 11 | Applying bullet/number formatting to a document that has no numbering definitions (`ensureNumbering()` creates an **empty** numbering part `[poi verified: XWPFDocument.createNumbering() 1017-1027]`) | `numID` is set but no definition matches it, so the list may render as plain text `[inference]`. | Known limitation (pre-existing) | Not fixed; numbering depth is roadmap Phase 4/6. Read/save of *existing* numbering is asserted (`editParagraph_keepsNumberingOnListParagraphs`) |
 | 12 | Undo/redo rewrites the runs of every touched paragraph | Content is rebuilt from the model, so the run *contents* survive (they are the same runs), but the paragraph XML is rewritten. | Intentionally modified (content-neutral after fix 3) | No editor change this phase; the plan's "rewrites unrelated paragraphs" concern is neutralised by run preservation, and the mapping fix (§3) keeps indices correct after an undo |
-| 13 | Document access (`content://` grant) | A document opened from the picker or an "Open with" hand-off could become unreadable after a device restart, and the raw platform denial text was shown. | Not content loss — availability/usability defect | **Fixed** — see `docs/decisions/0002-persistable-uri-access.md`; the user now reads "Access to this file has expired. Open it again to continue." with a "Back to files" action |
+| 13 | Document access (`content://` grant) | A document opened from the picker or an "Open with" hand-off could become unreadable after a device restart, and the raw platform denial text was shown. | Not content loss — availability/usability defect | **Fixed** — see `docs/decisions/0002-persistable-uri-access.md`; the user now reads "Access to this file has expired. Open it again to continue." with a "Back to files" action. Follow-up 2026-10-17: the failure is classified rather than always called "expired", "Try again" is offered when a second read could help, and the route argument is decoded once instead of twice |
 
 ## 3. Fixes shipped in this phase
 
@@ -136,6 +136,13 @@ environment `[inference]`.
 - A provider that never offers a persistable grant (some "Open with" hand-offs) still
   loses access at reboot; the fix there is the error message and the way back to the
   file list, not longer access.
+- Unsaved edits live in the editor's memory only, so a process death *while editing* loses
+  them: there is no draft/journal yet (roadmap Phase 3). Access expiring mid-session does
+  not lose them — a failed save keeps the document, the edits and the Export path in place,
+  and `src/shared/ui/UnsavedChangesGuard.kt` still stands between the edits and a back press.
+- The failure classification and the retry decision are unit-tested against a faked resolver
+  (`tests/shared/DocumentIoTest.kt`). Which exception a real provider throws for a revoked
+  grant, and what a device shows after a force-stop, is device work (§8) `[not-verified]`.
 
 ## 6. Safe save and recovery
 
@@ -149,14 +156,19 @@ environment `[inference]`.
 - **Nothing is written before the new bytes exist** — no partial serialization ever
   reaches the provider `[code]` (the document is materialised in memory by design,
   ADR 003).
-- **Failure text.** Load: expired access / file moved or deleted / all-files access
-  turned off / the editor's own fallback. Save: "This file can't be changed. Use
-  Export to save a copy." for permission failures. Provider names, PIDs, URIs and
-  paths never reach the user (`DocumentIo.kt:202-217`, asserted by tests).
-- **Recovery affordance.** A load failure now offers "Back to files" under the message
-  (`src/shared/ui/EditorChrome.kt:112-122`, `src/shared/ui/GridEditorScreen.kt:201-213`)
-  instead of a dead end. No draft/journal file is written: the app never copies
-  documents into private storage (ADR 003), so there is nothing to recover *from* —
+- **Failure text.** Load: revoked grant / denial while a grant is still held / file moved
+  or deleted / all-files access turned off / provider failure / the editor's own fallback.
+  Save: "This file can't be changed. Use Export to save a copy." for permission failures.
+  Provider names, PIDs, URIs and paths never reach the user (`DocumentIo.kt:228-253`,
+  asserted by tests).
+- **Recovery affordance.** A load failure offers "Try again" — one read per tap, shown only
+  when a second read could fix the failure, never for a document that is gone — beside
+  "Back to files" (`src/shared/ui/EditorChrome.kt:119-130`,
+  `src/shared/ui/GridEditorScreen.kt:208-219`). Reselecting through the picker renews the
+  grant; reopening the same document from the in-app browser needs no grant at all, because
+  it is read as a file. Nothing retries on its own: no resume-triggered loop, and a second
+  tap while a read is in flight is ignored. No draft/journal file is written: the app never
+  copies documents into private storage (ADR 003), so there is nothing to recover *from* —
   and the guarded write means the file on disk is either the old or the new revision.
 - **Not covered:** a crash *between* the write and the provider's commit, and
   providers that implement a partial write without throwing. Both need device tests
@@ -231,9 +243,29 @@ files for the round-trip cases.
     roadmap's Phase 3 error-taxonomy work; today the message is the editor fallback).
 14. **Rotate and background/foreground** during editing. *Expected:* no data loss, no
     duplicate save.
+15. **Revoked grant.** Android has no general UI for revoking one document grant, so revoke
+    by reinstalling the app (grants are dropped with the package) or take the reboot path
+    (step 4). *Expected:* the editor says access expired and offers "Try again" and
+    "Back to files"; **no** raw platform text, **no** crash, and never a blank document
+    standing in for the file.
+16. **Reselect and recover.** From that state: (a) tap "Back to files" and open the same
+    document again through the picker; and (b) open the same document from Files with
+    "Open with" while the app is still running. *Expected:* both show the current content on
+    disk and saving works again; (b) must not stack a second app instance, and back must not
+    land on the expired editor.
+17. **Try again.** In the failure state, tap "Try again" while the document is still
+    unreachable. *Expected:* one more attempt and then the same message — no self-retrying
+    loop, no endless spinner. For a failure a second read cannot fix (a deleted document)
+    the button is not offered at all.
+18. **Unsaved edits survive an access failure.** Edit a document, make the save fail
+    (step 5), then rotate the device and use Export. *Expected:* the edits are still in the
+    editor after rotation, the exported copy contains them, and a back press still asks
+    before discarding them. (A *process* death during editing is the one loss this phase
+    does not prevent — roadmap Phase 3.)
 
-Steps 4, 5 and 12 are the ones this phase's changes are meant to alter; steps 6–11
-are the ones the new suite predicts and a device must confirm.
+Steps 4, 5 and 12 are the ones this phase's changes are meant to alter; steps 15–18 cover
+the follow-up fixes; steps 6–11 are the ones the new suite predicts and a device must
+confirm. A device is the only place any of them can be settled.
 
 ## 9. Out of scope for this phase
 

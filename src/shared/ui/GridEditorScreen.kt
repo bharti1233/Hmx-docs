@@ -114,6 +114,8 @@ fun spreadsheetColumnLabel(index: Int): String {
  * row and row gutter, and add row/column actions. The host wires its ViewModel via
  * the callbacks; this composable owns no format-specific logic.
  *
+ * @param onRetry offered in the error state when another read could succeed (access
+ *        renewed, provider recovered); null when the failure is not worth retrying.
  * @param onSave invoked with a result callback (success via snackbar, error via dialog).
  * @param onExportToUri invoked with the chosen Save-as URI and a result callback.
  */
@@ -124,6 +126,7 @@ fun GridEditorScreen(
     dirty: Boolean,
     loading: Boolean,
     error: String?,
+    onRetry: (() -> Unit)? = null,
     hue: Color,
     rows: List<List<String>>,
     selectedRow: Int,
@@ -203,11 +206,15 @@ fun GridEditorScreen(
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
                     Text(text = error, color = KernTheme.colors.danger)
-                    // A load failure usually means the file could not be opened at all (an
-                    // expired picker grant, or the file was moved) — and a save cannot happen
-                    // because nothing is loaded, so the way forward is picking it again.
-                    TextButton(onClick = { backDispatcher?.onBackPressed() }) {
-                        Text("Back to files", color = KernTheme.colors.accent)
+                    // A failed load leaves no document to save, so the way forward is another
+                    // read (when it could succeed) or picking the file again.
+                    Row {
+                        onRetry?.let { retry ->
+                            TextButton(onClick = retry) { Text("Try again", color = KernTheme.colors.accent) }
+                        }
+                        TextButton(onClick = { backDispatcher?.onBackPressed() }) {
+                            Text("Back to files", color = KernTheme.colors.accent)
+                        }
                     }
                 }
                 else -> Column(Modifier.fillMaxSize()) {

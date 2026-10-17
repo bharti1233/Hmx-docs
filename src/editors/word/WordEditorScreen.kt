@@ -84,6 +84,7 @@ fun WordEditorScreen(
         dirty = vm.dirty,
         loading = vm.loading,
         error = vm.error,
+        onRetry = if (vm.canRetry) vm::retry else null,
         hue = hue,
         onSave = vm::save,
         exportMimeType = DOCX_MIME,

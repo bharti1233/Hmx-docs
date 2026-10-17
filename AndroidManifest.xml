@@ -33,6 +33,7 @@
             android:name="dev.kern.MainActivity"
             android:exported="true"
             android:label="@string/app_name"
+            android:launchMode="singleTop"
             android:theme="@style/Theme.Kern">
 
             <!-- Launcher -->

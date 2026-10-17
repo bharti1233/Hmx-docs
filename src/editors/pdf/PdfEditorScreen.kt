@@ -93,6 +93,7 @@ fun PdfEditorScreen(
         dirty = false,
         loading = vm.loading,
         error = vm.error,
+        onRetry = if (vm.canRetry) vm::retry else null,
         hue = hue,
         onSave = { it(false, "PDF editing arrives later in 0.1.5.0; use Export to copy.") },
         exportMimeType = PDF_MIME,

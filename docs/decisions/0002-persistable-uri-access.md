@@ -1,6 +1,7 @@
 # 0002 - Persistable document access (`content://`) and the picker contract
 
-- **Status:** DECIDED and implemented (Phase 2, 2026-10-16)
+- **Status:** DECIDED and implemented (Phase 2, 2026-10-16); follow-up fixes
+  implemented 2026-10-17 (see the follow-up section at the end)
 - **Date opened:** 2026-10-16
 - **Blocks:** nothing; edit-time access is independent of Phase 3's draft/journal work
 - **Does not block:** anything in the roadmap. It is a fix for a pre-existing defect,
@@ -96,9 +97,11 @@ browser, and a security-relevant permission must not be added as a speculative f
   (`FileBrowserScreen.kt:165`), an "Open with"/`ACTION_VIEW` hand-off
   (`IntentHandler.kt:33`), and each editor view model's `start()` (so a re-created route
   re-asks while the transient grant still exists).
-- Failures are never user-visible as platform text: `loadError` maps an expired access
-  to "Access to this file has expired. Open it again to continue." and the editor offers
-  "Back to files" (`EditorChrome.kt:112-122`, `GridEditorScreen.kt:201-213`).
+- Failures are never user-visible as platform text: `loadFailure` maps a failed read to
+  one of revoked access ("Access to this file has expired. Open it again to continue."),
+  denial-despite-a-held-grant, missing file, all-files access off, or a provider failure —
+  and the editor offers "Try again" (only when a second read could succeed) plus
+  "Back to files" (`EditorChrome.kt`, `GridEditorScreen.kt`).
 - No broad storage permission was added, and `ACTION_OPEN_DOCUMENT` remains the only
   picker used.
 
@@ -116,3 +119,53 @@ browser, and a security-relevant permission must not be added as a speculative f
 - The unit test proves the *decision logic* (which modes are asked for, in which order,
   and what is reported). It cannot prove what a real provider does — that is device
   checklist item 4 in `docs/docx-preservation.md` `[not-verified]`.
+
+## Follow-up (2026-10-17): the "access has expired" report
+
+A second report showed the message this decision introduced:
+
+> Access to this file has expired. Open it again to continue.
+
+In the case it was written for — the app holds no grant any more (device restart,
+force-stop, or an "Open with" hand-off that never carried a persistable grant) — that is the
+correct diagnosis, so the message appearing is not by itself a defect. Tracing the path
+around it turned up three real defects and one rough edge, all fixed here.
+
+1. **The route argument was decoded twice.** `NavDeepLink` already decodes a path argument
+   once `[verified: navigation-common 2.8.3 bytecode — two android.net.Uri.decode call
+   sites]`, and every route builder already encodes it (`FileBrowserScreen`, `IntentHandler`).
+   Each editor then called `Uri.decode` again in `start()`. For a `document%3A384825`-style
+   provider ID the second decode happens to be harmless (the provider reads the decoded
+   segment either way), but a name or ID carrying an escape of its own — a literal `%` in a
+   file name, an encoded `/` in a document ID — came out as a *different* file: "50% off.docx"
+   looked for "50 off.docx" (ENOENT → "moved or deleted"), and a mangled document ID is a
+   request a provider is entitled to refuse. So the app could report a missing file, or a
+   permission problem, for a document that was there and permitted. All six editors now use
+   `Uri.parse(it)`: encoding happens once, in the route builder.
+2. **A read failure was classified by exception type alone.** Any `SecurityException` was
+   reported as expired access — even while the app still held a persisted READ grant — which
+   sends the user to re-pick a file whose permission was never the problem. `DocumentIo.loadFailure`
+   now takes the grant state (`DocumentIo.persistedAccess`), reports refusal-with-grant as
+   its own case, and separates revoked grant / missing file / all-files access off / provider
+   failure (`Unable to open content`, or a provider that returned no stream). Messages still
+   carry no provider names, URIs or paths.
+3. **There was no way to try again.** The load-failure state now offers "Try again" beside
+   "Back to files" — one read per tap, offered only when `loadFailure` says a second read
+   could succeed (not for a deleted file). Nothing retries on its own: no resume-triggered
+   loop, and a second tap while a read is in flight is ignored. Reselecting through the
+   picker, or reopening the same file from the in-app browser (which reads it as a file, no
+   grant needed), remains the way to renew access — Android offers no API to re-grant
+   silently.
+4. **A second "Open with" on a running app stacked a second activity.** `MainActivity` had
+   no `launchMode`, so the `standard` default started a *new* instance (the document did
+   open, but the old editor — possibly the expired one — stayed underneath in the task). It
+   is now `singleTop`, and `onNewIntent` hands the document to the running composition, which
+   replaces the stack exactly as a cold "Open with" launch does. The controller stays inside
+   the composition: a `NavHostController` built by hand would lose its saved back stack on
+   process death.
+
+Not claimed: none of this was reproduced on a device `[not-verified]`. The unit tests pin
+the classification and the grant logic against a faked resolver
+(`tests/shared/DocumentIoTest.kt`); what `MediaDocumentsProvider` actually grants for a given
+file, and what a device shows after a force-stop or a reboot, is checklist item 4 and the new
+items in `docs/docx-preservation.md` §8.
