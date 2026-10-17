@@ -105,6 +105,9 @@ editors kept their document in memory after a failed save, so Export stayed avai
   provider write can still leave a damaged document; the rollback only runs while the
   process lives. An atomic replace would need a provider-specific "replace document"
   call that the platform does not offer generically.
+- **A kill during a local replace can leave a temporary file behind.** The document itself
+  is either the previous or the new one (that is what the rename guarantees), but the
+  abandoned `<name>.<random>.tmp` next to it is debris the user may have to delete.
 - **Not a semantic check.** A package that passes `verifyZipPackage` can still have lost
   content; that is covered by the preservation suite and the limitations in
   `docs/docx-preservation.md`, not by this check.

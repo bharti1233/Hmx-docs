@@ -276,7 +276,10 @@ class DocumentIoTest {
         // Every entry is intact, but the end record was never written: readers such as
         // Word reject this, so it must not replace a document either.
         val complete = zip("word/document.xml" to "<w:document/>".toByteArray())
-        val centralDirectory = indexOf(complete, byteArrayOf(0x50, 0x4b, 0x01, 0x02))
+        val centralDirectory = indexOf(
+            complete,
+            byteArrayOf(0x50.toByte(), 0x4b.toByte(), 0x01.toByte(), 0x02.toByte()),
+        )
         assertTrue("the fixture has a central directory to cut off", centralDirectory > 0)
         assertFalse(DocumentIo.verifyZipPackage(complete.copyOf(centralDirectory)))
     }
