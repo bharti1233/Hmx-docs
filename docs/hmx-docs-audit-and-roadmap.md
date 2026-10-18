@@ -130,12 +130,12 @@ Legend: **IV** = implemented+verified (by an existing automated test or explicit
 | Paragraph alignment | IU | `WordDocument.kt:341-346` | No RTL/bidi; justify is app-side only | bidi | P2 | M | layout |
 | Indent | PI — left indent only | `VM:344-364` | First-line/hanging/right indent unmodeled | Properties | P2 | M | model |
 | Headings / styles | PI — Title/H1/H2 only | `kindOf`, `WordDocument.kt:261-269` | H3–H9 and custom styles display as body; no style catalog; writing kind writes literal `Title/Heading1/Heading2/Normal` | Style catalog + picker | P1 | M | model |
-| Bullets / numbered lists | PI | read numFmt only; write sets numID 1/2, ilvl 0 | Nested levels flattened; numbering definitions may not exist/match; render always "• "/"1. " | Numbering model | P0 (data integrity) | M | model |
+| Bullets / numbered lists | PI — bullet/number toggle | `listTypeOf` / `createNumberingDefinition`, `WordDocument.kt` | Read from the definition (level-0 fallback when `w:ilvl` is absent) and written as real definitions with ids above the document’s own (Phase 4); still: one level per list type in the UI, applying Number in a later save starts a new list, render always "• "/"1. " | Numbering model + level UI (`ilvl`) | P0 write path fixed (Phase 4) | M | model |
 | Find & replace | IU | `VM:510-625` | Case-insensitive only; no whole-word/regex; active-match highlight always index 0 (the replacement itself now keeps the paragraph's runs — `WordRichText.replaceRuns`) | Whole-word/regex, highlight the active match | P2 | S | model |
 | Undo / redo | IU — 30 whole-state snapshots | `VM:58-73,616-664` | Snapshot granularity = per keystroke; large-doc memory; **undo marks all blocks/paragraphs edited** | Op-based history | P0 | M | model |
-| Tables | PI — text grid + modal | `WordDocument.kt:302-329`, `Screen:516-669` | No merges/widths/borders; multi-paragraph cells collapse; **column delete doesn't remove cells**; rows added via `createRow()` without grid widths; nested tables invisible | Table model | P1 | H | model |
-| Images | PI — read + display | `WordDocument.kt:231-243`, `Screen:672-696` | No size/position (max 260 dp height), no insert/delete, images in tables not read, VML invisible, **index-shift bug with multi-image/text+image paragraphs**, image deleted if its paragraph is edited | Image model | P1 | H | model |
-| Hyperlinks | PI — text read; URL captured but unused | `WordDocument.kt:198,257`; no writes elsewhere | Not clickable; **destroyed when the paragraph is edited** | Link runs | P1 | M | model |
+| Tables | PI — text grid + modal | `WordDocument.kt:302-329`, `Screen:516-669` | No merges/widths/borders and no merge UI; a cell reads/writes one line per paragraph and an untouched cell is not rewritten, so cell formatting, pictures and whole-cell links survive a table edit (Phase 4); column delete removes cells (Phase 2) but not their `tblGrid` entry; rows added via `createRow()` without grid widths; nested tables invisible | Table model | P1 | H | model |
+| Images | PI — read + display | `WordDocument.kt:231-243`, `Screen:672-696` | No size/position (max 260 dp height), no insert/delete, images in tables not shown in the UI (a picture inside an edited cell survives, Phase 4), VML invisible; the index-shift bug and deletion of images on edit of their paragraph are fixed (Phases 2/4) | Image model | P1 | H | model |
+| Hyperlinks | PI — text read; URL carried through the editor | `WordDocument.kt:198,257`; no writes elsewhere | Not clickable; a target survives an edit of its paragraph (Phase 2) and of the paragraphs around it (Phase 4); editing a link makes a new `rels` entry and orphans the old one (harmless) | Link runs | P1 | M | model |
 | Page layout / pagination | NI | `WordPage` = single LazyColumn "paper" | No page size/margins/section geometry; `w:pgSz` ignored for display | Layout engine | P1 | VH | model |
 | Headers/footers/page numbers | NI (preserved only if untouched) | never read in `WordDocument` | Page numbering ignored | Header/footer model + render | P2 | H | layout |
 | Page breaks / section breaks | NI | `r.text()` maps `w:br` → `\n`; render as line break | A page break in an edited paragraph is downgraded to a line break | Break model | P1 | M | layout |
@@ -177,22 +177,27 @@ Legend: **IV** = implemented+verified (by an existing automated test or explicit
 | Runs, mixed formatting | P/R/E partial | Only bold, italic, underline(!=NONE), strike, size, colour, font name. **L on edit**: highlight, shading, `vertAlign`, caps/smallCaps (POI uppercases text on read — the case change becomes permanent), `rStyle` character styles, double-strike, emboss/outline/shadow, spacing/kern/position, language, underline style/colour, complex-script variants (`WordDocument.kt:245-259` reads; `331-339` writes) |
 | Styles / inheritance | P partial | `p.style` → 4 coarse kinds; style inheritance resolved by Word, not by the app; editing kind writes literal style IDs that may not exist in the document |
 | Headings / outline levels | P partial | `w:outlineLvl` and Heading3+ are not distinguished |
-| Tables | P/R/E partial | Text-only grid; widths/borders/shading survive untouched; **merges not modeled**; multi-paragraph cells collapse into one paragraph on edit (`writeTable` sets only `paragraphs[0]`); `setText` with embedded `\n` writes one `w:t` (POI source) — no line breaks; **column deletion never removes cells**; added rows have no `gridCol` widths; nested tables invisible |
-| Images (DrawingML inline) | P/R/S partial | Extracted from runs; **no extents**; paragraph with 2+ images or image+text breaks block↔element index mapping; editing such a paragraph **deletes its images** (runs removed) |
+| Tables | P/R/E partial | Text-only grid; widths/borders/shading survive untouched; **merges not modeled**; Phase 4: a cell reads/writes one line per paragraph, a cell the editor did not touch is not rewritten at all, an edited cell keeps its first run's formatting and its inline content; column deletion removes cells (Phase 2); still: `tblGrid` and merge spans can describe the old shape after a column edit, added rows have no `gridCol` widths, nested tables invisible |
+| Images (DrawingML inline) | P/R/S partial | Extracted from runs; **no extents**; a paragraph with 2+ images or image+text used to break the block/element index mapping — fixed by `Parsed.elementIndices` (Phase 2); editing such a paragraph used to delete its images (runs removed) — fixed in Phases 2/4: the kept run is written back at the character position it held |
 | Floating images (anchor), shapes, text boxes | P/S only if untouched | Not extracted from runs (`embeddedPictures` covers inline + anchored inside runs, but nothing is rendered at its position); VML images unknown/likely invisible |
-| Hyperlinks | P partial; L | Link ID captured and unused; not clickable; destroyed on edit of that paragraph; orphaned `rels` entry |
-| Lists & numbering | P partial; risky write | Read: `numID != null` + `numFmt` only; level `ilvl` ignored. Write: `numID=1/2`, `ilvl=0`, numbering part created only if absent (`ensureNumbering`) |
+| Hyperlinks | P; L partial | Link URL resolved on read and carried through the editor; not clickable; survives an edit of its paragraph (Phase 2) and of its neighbours (Phase 4); editing a link creates a new `rels` entry and orphans the old one (harmless) |
+| Lists & numbering | P/R/E partial | Read: numbering reference + format from the definition, with a level-0 fallback and a guard against dangling references. Write: real abstract numbering + num per list type per save, ids above the document’s own, no re-pointing of a paragraph already in that type, `ilvl=0` (Phase 4); a document’s levels are preserved but not offered in the UI |
 | Sections / page size / margins | P(no)/S | `w:sectPr` never read for display; preserved while untouched |
 | Headers / footers / page numbers | N/S(unverified) | Never read; POI re-serializes them on save; no test exists |
 | Footnotes / endnotes | N; **corruption risk** | POI `XWPFRun.text()` renders references as `[footnoteRef:n]`; editing the paragraph writes that literal text and deletes the reference run |
 | Comments | N | `comments.xml` preserved only via POI |
-| Tracked changes | N; risk | POI `getRuns()` includes runs inside `w:ins` (verified in POI source, `buildRunsInOrderFromXml`); editing accepts them and leaves empty `w:ins`; `w:del` text handling unverified |
-| Fields | P as text; L on edit | `w:fldSimple` runs included; `instrText` suppressed by POI; complex-field `fldChar` runs are removed by `writeRuns` → field destroyed on edit |
+| Tracked changes | N; risk | POI `getRuns()` includes runs inside `w:ins` (verified in POI source, `buildRunsInOrderFromXml`); editing a paragraph with an insertion accepts it (text becomes ordinary text, the wrapper empties); `w:del`/`w:moveFrom` runs are read out of the model, kept in place and never rewritten (Phase 4, asserted) |
+| Fields | P as text; P on edit | `w:fldSimple` runs included; `instrText` suppressed by POI; complex-field `fldChar` runs are kept (Phase 2) and written back at the character position they held (Phase 4), so a field survives an edit of its paragraph |
 | Bookmarks | P/S | Siblings of runs; survive |
-| SDT / content controls | N/S | Run-level SDT text excluded from `p.runs` (POI adds `XWPFSDT` only to `iruns`), so invisible in app; block-level SDT → `OpaqueBlock`. Preserved in XML while untouched |
+| SDT / content controls | N/S | Run-level SDT text excluded from `p.runs` (POI adds `XWPFSDT` only to `iruns`), so invisible in app; block-level SDT → `OpaqueBlock`. Preserved in XML while untouched — asserted by an injected-XML fixture (Phase 4) |
 | Math, charts, SmartArt, embedded objects | N/S best-effort | Invisible; POI/XMLBeans preservation unverified by any test |
 | Metadata / rels | S | POI re-serializes docProps; relationships of deleted runs (hyperlinks) are orphaned but harmless |
 | Unknown XML | ? | "Best-effort" by POI; **no verification exists** — must be measured (Phase 2) |
+
+> **Status (Phases 2–4):** the rows above are the audit as found; a parenthetical records
+the phase that fixed a row. `docs/docx-preservation.md` is the current source of truth for
+what a save preserves, the model and its sources of truth (§1.1), the per-row disposition
+(§2) and the remaining limits (§5).
 
 ### 4.3 Serialization audit answers
 
@@ -498,6 +503,33 @@ crash-injection test and physical-device acceptance run, which are what the phas
 **Risks:** POI accessor gaps (anchor extents, tcPr) may require raw CT access; treat escaping to `XmlObject` as normal, not exceptional.
 
 **Effort:** 15–25 days (≈ 5–8 weeks part-time). **Deliverable:** widened model + parsers with tests. **Do not proceed until:** corpus no-op round-trip passes preservation assertions for all fixtures.
+
+**Status 2026-10-18 (what actually landed, package 1–3 and 7 in part):** a targeted
+Phase 4 rather than the full widening — the model stays as it is, and the fixes were
+made where the *existing* model silently damaged content:
+
+- Numbering: the editor now writes real definitions (abstract numbering with three
+  levels + concrete num, ids allocated above the document's own), shares one definition
+  per list type per save, never re-points a paragraph that is already in that list type,
+  reads a list's type from its definition when a paragraph has no `w:ilvl`, and no
+  longer throws on a dangling `numId`. Still to do: `lvlText`/indent/`start` fidelity and
+  an `ilvl` UI (indent/outdent).
+- Runs and position: a paragraph's runs the model cannot express are kept *at their
+  character offset* (`writeRuns` + `mapAnchor` + `insertNewRun`/`insertNewHyperlinkRun`),
+  so a caption edit no longer moves its picture to the front; tracked-deletion text is
+  read out of the model, kept in place and never rewritten. Still to do: extend
+  `RunStyle` (superscript, character styles, highlight) — the `@Ignore`d probe test waits
+  for it.
+- Tables: cells read as one line per paragraph and write back as paragraphs; a cell the
+  editor did not touch is not rewritten at all; a rewritten cell keeps its own first-run
+  formatting, inline content and a whole-cell link. Still to do: `tcW`/`tblGrid` widths,
+  `gridSpan`/`vMerge` editing, and a `tblGrid` update when a column is inserted.
+- Not started: styles catalog (package 1), image extents/placement (4), hyperlink run
+  types (5), break variants (6), outline/`sectPr` model (8).
+
+Evidence and limits: `docs/docx-preservation.md` §1.1 (model and sources of truth),
+§2 rows 3/8/11/14–18, §3 "Phase 4", §5, §7, and the Phase 4 tests in
+`tests/editors/word/WordPreservationTest.kt`.
 
 ---
 

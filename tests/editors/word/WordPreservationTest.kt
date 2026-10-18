@@ -5,6 +5,7 @@ import org.apache.poi.util.Units
 import org.apache.poi.wp.usermodel.HeaderFooterType
 import org.apache.poi.xwpf.usermodel.Document
 import org.apache.poi.xwpf.usermodel.UnderlinePatterns
+import org.apache.poi.xwpf.usermodel.XWPFAbstractNum
 import org.apache.poi.xwpf.usermodel.XWPFDocument
 import org.apache.poi.xwpf.usermodel.XWPFFieldRun
 import org.apache.poi.xwpf.usermodel.XWPFHyperlinkRun
@@ -14,14 +15,19 @@ import org.apache.poi.xwpf.usermodel.XWPFTable
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Ignore
 import org.junit.Test
+import org.openxmlformats.schemas.wordprocessingml.x2006.main.CTAbstractNum
+import org.openxmlformats.schemas.wordprocessingml.x2006.main.STNumberFormat
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.math.BigInteger
 import java.util.Base64
+import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
+import java.util.zip.ZipOutputStream
 
 /**
  * DOCX preservation regression suite.
@@ -493,6 +499,8 @@ class WordPreservationTest {
         assertTrue("the field structure survives, was $block", block.contains("fld(PAGE \\* MERGEFORMAT)"))
         assertTrue("the edited text is applied exactly once, was $block", block.contains("[Page 7|]"))
         assertTrue("no duplicated field text, was $block", !block.contains("Page 7Page"))
+        // The field keeps its place: the character the edit added was typed in front of it.
+        assertEquals(listOf("t(Page 7)", "fld"), runOrder(after, "Page 7"))
     }
 
     @Test
@@ -673,6 +681,555 @@ class WordPreservationTest {
         assertTrue(
             "the table edit reached the document",
             snapshot(saved).blocks.any { it.contains("tbl(A1|B1;A2|B2)") },
+        )
+    }
+
+    // ---- Phase 4: lists -----------------------------------------------------
+
+    /** An abstract numbering with two levels, the shape Word writes for a list. */
+    private fun abstractNumbering(id: Long, bullet: Boolean): XWPFAbstractNum {
+        val abstractNum = CTAbstractNum.Factory.newInstance()
+        abstractNum.setAbstractNumId(BigInteger.valueOf(id))
+        for (level in 0 until 2) {
+            val lvl = abstractNum.addNewLvl()
+            lvl.setIlvl(BigInteger.valueOf(level.toLong()))
+            lvl.addNewNumFmt().setVal(if (bullet) STNumberFormat.BULLET else STNumberFormat.DECIMAL)
+            lvl.addNewLvlText().setVal(if (bullet) "\u2022" else "%${level + 1}.")
+        }
+        return XWPFAbstractNum(abstractNum)
+    }
+
+    private fun listItem(doc: XWPFDocument, text: String, numId: Long, level: Long = 0) {
+        doc.createParagraph().also { p ->
+            p.createRun().setText(text)
+            p.setNumID(BigInteger.valueOf(numId))
+            p.setNumILvl(BigInteger.valueOf(level))
+        }
+    }
+
+    /**
+     * Bullets (with a second level), a numbered list of two items, a plain paragraph and a
+     * second numbered list that restarts at one — the shapes a numbering change must neither
+     * merge nor restart.
+     */
+    private fun lists(): ByteArray = docx { doc ->
+        doc.createNumbering().also { numbering ->
+            numbering.addAbstractNum(abstractNumbering(0, bullet = true))
+            numbering.addAbstractNum(abstractNumbering(1, bullet = false))
+            numbering.addNum(BigInteger.ZERO, BigInteger.ONE)
+            numbering.addNum(BigInteger.ONE, BigInteger.valueOf(2))
+            numbering.addNum(BigInteger.ONE, BigInteger.valueOf(3))
+        }
+        listItem(doc, "Bullet one", numId = 1)
+        listItem(doc, "Bullet two", numId = 1, level = 1)
+        listItem(doc, "Numbered one", numId = 2)
+        listItem(doc, "Numbered two", numId = 2)
+        doc.createParagraph().createRun().setText("Plain between lists")
+        listItem(doc, "Restarted one", numId = 3)
+    }
+
+    private fun listTypeOf(bytes: ByteArray, text: String): WordDocument.ListType =
+        WordDocument.read(bytes).blocks
+            .filterIsInstance<WordDocument.ParagraphBlock>()
+            .first { it.text == text }
+            .props.listType
+
+    @Test
+    fun load_readsBulletsNumbersAndListRestartsApart() {
+        val bytes = lists()
+        assertEquals(WordDocument.ListType.BULLET, listTypeOf(bytes, "Bullet one"))
+        assertEquals("a sub-level of a bullet list is still a bullet", WordDocument.ListType.BULLET, listTypeOf(bytes, "Bullet two"))
+        assertEquals(WordDocument.ListType.NUMBER, listTypeOf(bytes, "Numbered one"))
+        assertEquals(WordDocument.ListType.NUMBER, listTypeOf(bytes, "Numbered two"))
+        assertEquals("the restarted list is still a numbered list", WordDocument.ListType.NUMBER, listTypeOf(bytes, "Restarted one"))
+        assertEquals(WordDocument.ListType.NONE, listTypeOf(bytes, "Plain between lists"))
+    }
+
+    @Test
+    fun load_readsABulletThatCarriesNoItemLevelFromItsDefinition() {
+        // Word writes w:ilvl for lists it creates, but converted documents often carry only
+        // w:numId; OOXML then means level 0, whose format has to come from the definition.
+        val bytes = docx { doc ->
+            doc.createNumbering().also { numbering ->
+                numbering.addAbstractNum(abstractNumbering(0, bullet = true))
+                numbering.addNum(BigInteger.ZERO, BigInteger.ONE)
+            }
+            doc.createParagraph().also { p ->
+                p.createRun().setText("Bullet without level")
+                p.setNumID(BigInteger.ONE)
+            }
+        }
+        assertEquals(WordDocument.ListType.BULLET, listTypeOf(bytes, "Bullet without level"))
+    }
+
+    @Test
+    fun applyBullet_writesADefinitionTheDocumentCanResolve() {
+        // Before the fix the save created an empty numbering part and pointed the paragraph at
+        // num id 1, which did not exist: the list rendered as plain text.
+        val bytes = plain()
+        val index = blockIndex(bytes, "Second line")
+        val after = WordDocument.applyEditsAndSerialize(
+            bytes,
+            paraProps = mapOf(index to WordDocument.ParaPropsUpdate(listType = WordDocument.ListType.BULLET)),
+        )
+
+        XWPFDocument(ByteArrayInputStream(after)).use { doc ->
+            val p = doc.bodyElements.filterIsInstance<XWPFParagraph>()[1]
+            val numId = p.numID
+            assertNotNull("the paragraph references a list", numId)
+            assertEquals("the reference resolves to a bullet list", "bullet", p.numFmt)
+            assertNotNull("the num exists", doc.numbering.getNum(numId))
+        }
+        val read = WordDocument.read(after).blocks[index] as WordDocument.ParagraphBlock
+        assertEquals("the editor reads the item back as a bullet", WordDocument.ListType.BULLET, read.props.listType)
+        assertEquals("the text is untouched", "Second line", read.text)
+    }
+
+    @Test
+    fun applyNumberToTwoParagraphs_putsThemInOneList() {
+        val bytes = plain()
+        val update = WordDocument.ParaPropsUpdate(listType = WordDocument.ListType.NUMBER)
+        val after = WordDocument.applyEditsAndSerialize(bytes, paraProps = mapOf(0 to update, 1 to update))
+
+        val numIds = XWPFDocument(ByteArrayInputStream(after)).use { doc ->
+            doc.bodyElements.filterIsInstance<XWPFParagraph>().map { it.numID }
+        }
+        assertNotNull("both items reference a definition", numIds[0])
+        assertEquals("both items share one list", numIds[0], numIds[1])
+        assertEquals(
+            listOf(
+                WordDocument.ListType.NUMBER,
+                WordDocument.ListType.NUMBER,
+                WordDocument.ListType.NONE,
+            ),
+            WordDocument.read(after).blocks.map { (it as WordDocument.ParagraphBlock).props.listType },
+        )
+    }
+
+    @Test
+    fun applyBullet_keepsTheExistingListsAndTheirDefinitions() {
+        val bytes = lists()
+        val index = blockIndex(bytes, "Plain between lists")
+        val after = WordDocument.applyEditsAndSerialize(
+            bytes,
+            paraProps = mapOf(index to WordDocument.ParaPropsUpdate(listType = WordDocument.ListType.BULLET)),
+        )
+
+        XWPFDocument(ByteArrayInputStream(after)).use { doc ->
+            fun paragraph(text: String) = doc.bodyElements.filterIsInstance<XWPFParagraph>().first { it.text == text }
+            assertEquals("the bullet list keeps its id", BigInteger.ONE, paragraph("Bullet one").numID)
+            assertEquals("the numbered list keeps its id", BigInteger.valueOf(2), paragraph("Numbered one").numID)
+            assertEquals("the restarted list keeps its own id", BigInteger.valueOf(3), paragraph("Restarted one").numID)
+            assertEquals("the numbered list is still decimal", "decimal", paragraph("Numbered one").numFmt)
+            val applied = paragraph("Plain between lists").numID
+            assertNotNull("the new item references a list", applied)
+            assertTrue("the new list is its own", applied != null && applied !in listOf(BigInteger.ONE, BigInteger.valueOf(2), BigInteger.valueOf(3)))
+            assertEquals("the new list resolves", "bullet", paragraph("Plain between lists").numFmt)
+        }
+        assertEquals(
+            "the editor reads the new item back as a bullet",
+            WordDocument.ListType.BULLET,
+            listTypeOf(after, "Plain between lists"),
+        )
+        assertEquals("the numbered items stay numbered", WordDocument.ListType.NUMBER, listTypeOf(after, "Numbered two"))
+    }
+
+    @Test
+    fun applyNumberToAnItemThatIsAlreadyNumbered_doesNotRestartIt() {
+        val bytes = lists()
+        val index = blockIndex(bytes, "Numbered one")
+        val after = WordDocument.applyEditsAndSerialize(
+            bytes,
+            paraProps = mapOf(index to WordDocument.ParaPropsUpdate(listType = WordDocument.ListType.NUMBER)),
+        )
+        XWPFDocument(ByteArrayInputStream(after)).use { doc ->
+            val p = doc.bodyElements.filterIsInstance<XWPFParagraph>().first { it.text == "Numbered one" }
+            assertEquals("the item stays in its own list", BigInteger.valueOf(2), p.numID)
+            assertEquals("no definition was added", 2, doc.numbering.getAbstractNums().size)
+            assertEquals("no list was added", 3, doc.numbering.getNums().size)
+        }
+    }
+
+    @Test
+    fun changeTheListTypeOfAnItem_movesItToTheOtherList() {
+        val bytes = lists()
+        val index = blockIndex(bytes, "Numbered two")
+        val after = WordDocument.applyEditsAndSerialize(
+            bytes,
+            paraProps = mapOf(index to WordDocument.ParaPropsUpdate(listType = WordDocument.ListType.BULLET)),
+        )
+        XWPFDocument(ByteArrayInputStream(after)).use { doc ->
+            fun paragraph(text: String) = doc.bodyElements.filterIsInstance<XWPFParagraph>().first { it.text == text }
+            assertEquals("the item became a bullet", "bullet", paragraph("Numbered two").numFmt)
+            assertEquals("the other item keeps its list", BigInteger.valueOf(2), paragraph("Numbered one").numID)
+        }
+    }
+
+    @Test
+    fun aDanglingNumberingReferenceDoesNotStopOpenOrSave() {
+        // POI's getNumFmt() throws when the num the paragraph points at has no abstract
+        // definition [verified against XWPFParagraph 310-330]. A damaged document must open
+        // and save, with the damaged reference left as it is.
+        val bytes = docx { doc ->
+            doc.createNumbering().also { numbering ->
+                numbering.addAbstractNum(abstractNumbering(0, bullet = false))
+                numbering.addNum(BigInteger.ZERO, BigInteger.ONE)
+                numbering.removeAbstractNum(BigInteger.ZERO)
+            }
+            doc.createParagraph().also { p ->
+                p.createRun().setText("Damaged item")
+                p.setNumID(BigInteger.ONE)
+            }
+            doc.createParagraph().createRun().setText("Tail")
+        }
+
+        assertEquals(
+            "a damaged list reference still reads as a list item",
+            WordDocument.ListType.NUMBER,
+            listTypeOf(bytes, "Damaged item"),
+        )
+        val after = WordDocument.applyEditsAndSerialize(bytes, mapOf(1 to listOf(WordDocument.Run("Edited tail"))))
+        assertEquals("the edit is saved", "Edited tail", textOf(after, 1))
+        XWPFDocument(ByteArrayInputStream(after)).use { doc ->
+            assertEquals(
+                "the damaged reference is left alone",
+                BigInteger.ONE,
+                doc.bodyElements.filterIsInstance<XWPFParagraph>()[0].numID,
+            )
+        }
+    }
+
+    // ---- Phase 4: run order inside an edited paragraph ----------------------
+
+    /** Text with a picture between two text runs of the same paragraph. */
+    private fun pictureBetweenText(): ByteArray = docx { doc ->
+        doc.createParagraph().also { p ->
+            p.createRun().setText("before ")
+            addPicture(p.createRun(), "middle.png")
+            p.createRun().setText("after")
+        }
+        doc.createParagraph().createRun().setText("Tail")
+    }
+
+    /** Two hyperlinks pointing at different targets, with plain text between them. */
+    private fun withTwoLinks(): ByteArray = docx { doc ->
+        doc.createParagraph().also { p ->
+            p.createHyperlinkRun("https://example.com/one").setText("first")
+            p.createRun().setText(" and ")
+            p.createHyperlinkRun("https://example.com/two").setText("second")
+        }
+    }
+
+    /** The runs of the first paragraph whose text contains [text], in document order. */
+    private fun runOrder(bytes: ByteArray, text: String): List<String> =
+        XWPFDocument(ByteArrayInputStream(bytes)).use { doc ->
+            val p = doc.bodyElements.filterIsInstance<XWPFParagraph>().first { it.text.contains(text) }
+            p.runs.map { run ->
+                when {
+                    run.embeddedPictures?.isNotEmpty() == true -> "img"
+                    run is XWPFFieldRun -> "fld"
+                    else -> "t(${run.text()})"
+                }
+            }
+        }
+
+    @Test
+    fun editCaption_keepsThePicturesAfterTheEditedText() {
+        // Before the fix a kept run was written in front of the rebuilt text, so editing the
+        // caption moved its pictures to the start of the paragraph.
+        val bytes = withImages()
+        val index = blockIndex(bytes, "Caption")
+        val after = WordDocument.applyEditsAndSerialize(bytes, mapOf(index to listOf(WordDocument.Run("New caption"))))
+        assertEquals(listOf("t(New caption)", "img", "img"), runOrder(after, "New caption"))
+        assertEquals("no picture is lost", 3, snapshot(after).pictures.size)
+    }
+
+    @Test
+    fun editTextAroundAPicture_keepsThePictureBetweenTheText() {
+        val bytes = pictureBetweenText()
+        val index = blockIndex(bytes, "before after")
+        val after = WordDocument.applyEditsAndSerialize(bytes, mapOf(index to listOf(WordDocument.Run("before edited after"))))
+        assertEquals(listOf("t(before)", "img", "t( edited after)"), runOrder(after, "before"))
+        assertEquals(listOf("middle.png"), snapshot(after).pictures)
+        assertEquals("before edited after", textOf(after, index))
+    }
+
+    @Test
+    fun editTextBetweenTwoLinks_keepsBothTargets() {
+        val bytes = withTwoLinks()
+        val index = blockIndex(bytes, "first and second")
+        val after = WordDocument.applyEditsAndSerialize(
+            bytes,
+            mapOf(
+                index to listOf(
+                    WordDocument.Run("first", WordDocument.RunStyle(linkUrl = "https://example.com/one")),
+                    WordDocument.Run(" plus "),
+                    WordDocument.Run("second", WordDocument.RunStyle(linkUrl = "https://example.com/two")),
+                ),
+            ),
+        )
+        val read = WordDocument.read(after).blocks[index] as WordDocument.ParagraphBlock
+        assertEquals("first plus second", read.text)
+        assertEquals(
+            "both targets survive the edit",
+            listOf("https://example.com/one", "https://example.com/two"),
+            read.runs.mapNotNull { it.style.linkUrl },
+        )
+    }
+
+    // ---- Phase 4: table cells ----------------------------------------------
+
+    /** A table with a two-paragraph cell, a bold cell, an empty cell and a picture cell. */
+    private fun withRichTable(): ByteArray = docx { doc ->
+        val t = doc.createTable(2, 2)
+        t.getRow(0).getCell(0).also { cell ->
+            cell.paragraphs[0].createRun().setText("First")
+            cell.addParagraph().createRun().setText("Second")
+        }
+        t.getRow(0).getCell(1).also { cell ->
+            cell.paragraphs[0].createRun().also { run -> run.setText("Bold"); run.isBold = true }
+        }
+        t.getRow(1).getCell(0).setText("")
+        t.getRow(1).getCell(1).also { cell -> addPicture(cell.paragraphs[0].createRun(), "cell.png") }
+    }
+
+    private fun tableGrid(bytes: ByteArray, nth: Int = 0): List<List<String>> {
+        val index = tableBlockIndex(bytes, nth)
+        return (WordDocument.read(bytes).blocks[index] as WordDocument.TableBlock).rows
+    }
+
+    private fun cellLines(bytes: ByteArray, row: Int, col: Int): List<String> =
+        XWPFDocument(ByteArrayInputStream(bytes)).use { doc ->
+            doc.bodyElements.filterIsInstance<XWPFTable>().first()
+                .getRow(row).getCell(col).paragraphs.map { it.text ?: "" }
+        }
+
+    private fun cellPictures(bytes: ByteArray, row: Int, col: Int): List<String> =
+        XWPFDocument(ByteArrayInputStream(bytes)).use { doc ->
+            doc.bodyElements.filterIsInstance<XWPFTable>().first()
+                .getRow(row).getCell(col).paragraphs
+                .flatMap { p -> p.runs.flatMap { run -> run.embeddedPictures ?: emptyList() } }
+                .mapNotNull { it.pictureData?.fileName }
+        }
+
+    private fun cellIsBold(bytes: ByteArray, row: Int, col: Int): Boolean =
+        XWPFDocument(ByteArrayInputStream(bytes)).use { doc ->
+            doc.bodyElements.filterIsInstance<XWPFTable>().first()
+                .getRow(row).getCell(col).paragraphs[0].runs[0].isBold
+        }
+
+    private fun editCell(bytes: ByteArray, index: Int, row: Int, col: Int, text: String): ByteArray {
+        val grid = tableGrid(bytes).mapIndexed { r, cells ->
+            if (r == row) cells.mapIndexed { c, cell -> if (c == col) text else cell } else cells
+        }
+        return WordDocument.applyEditsAndSerialize(bytes, tableEdits = mapOf(index to grid))
+    }
+
+    @Test
+    fun load_readsACellsParagraphsAsLines() {
+        val rows = tableGrid(withRichTable())
+        assertEquals(listOf("First\nSecond", "Bold"), rows[0])
+        assertEquals(listOf("", ""), rows[1])
+    }
+
+    @Test
+    fun saveWithoutEdits_keepsMultiParagraphCellsTheirFormattingAndTheirPicture() {
+        val bytes = withRichTable()
+        val after = WordDocument.applyEditsAndSerialize(bytes)
+        assertEquals("the cell keeps both paragraphs", listOf("First", "Second"), cellLines(after, 0, 0))
+        assertEquals("the bold cell keeps its text", listOf("Bold"), cellLines(after, 0, 1))
+        assertTrue("the bold cell is still bold", cellIsBold(after, 0, 1))
+        assertEquals("the cell keeps its picture", listOf("cell.png"), cellPictures(after, 1, 1))
+        assertEquals("the empty cell stays empty", listOf(""), cellLines(after, 1, 0))
+    }
+
+    @Test
+    fun editOneCell_changesOnlyThatCellAndKeepsTheOthersWhole() {
+        // Before the fix every cell's first paragraph was rewritten on any table edit, which
+        // dropped the bold of a cell nobody had touched and deleted pictures inside cells.
+        val bytes = withRichTable()
+        val index = tableBlockIndex(bytes)
+        val after = editCell(bytes, index, row = 0, col = 1, text = "Bold edited")
+
+        assertEquals("the edited cell took the new text", listOf("Bold edited"), cellLines(after, 0, 1))
+        assertTrue("the edited cell keeps its formatting", cellIsBold(after, 0, 1))
+        assertEquals("the two-paragraph cell is untouched", listOf("First", "Second"), cellLines(after, 0, 0))
+        assertEquals("the picture cell is untouched", listOf("cell.png"), cellPictures(after, 1, 1))
+        assertEquals("the empty cell stays empty", listOf(""), cellLines(after, 1, 0))
+        assertEquals(
+            "the grid reads back with the edit",
+            listOf(listOf("First\nSecond", "Bold edited"), listOf("", "")),
+            tableGrid(after),
+        )
+    }
+
+    @Test
+    fun editATwoParagraphCell_keepsBothLines() {
+        // The cell used to be read as "FirstSecond" (POI concatenates a cell's paragraphs with
+        // nothing between them) and written back into its first paragraph, duplicating the rest.
+        val bytes = withRichTable()
+        val index = tableBlockIndex(bytes)
+        val after = editCell(bytes, index, row = 0, col = 0, text = "First\nSecond edited")
+
+        assertEquals(listOf("First", "Second edited"), cellLines(after, 0, 0))
+        assertEquals("the other cells are untouched", listOf("Bold"), cellLines(after, 0, 1))
+        assertEquals("the cell keeps its picture", listOf("cell.png"), cellPictures(after, 1, 1))
+    }
+
+    @Test
+    fun editACellWithAPicture_keepsThePicture() {
+        val bytes = withRichTable()
+        val index = tableBlockIndex(bytes)
+        val after = editCell(bytes, index, row = 1, col = 1, text = "Caption text")
+
+        assertEquals(listOf("Caption text"), cellLines(after, 1, 1))
+        assertEquals("the picture stays in the cell", listOf("cell.png"), cellPictures(after, 1, 1))
+    }
+
+    @Test
+    fun editACellThatHoldsAWholeCellLink_keepsTheTarget() {
+        val bytes = docx { doc ->
+            val t = doc.createTable(1, 1)
+            t.getRow(0).getCell(0).paragraphs[0].createHyperlinkRun("https://example.com/cell").setText("Cell link")
+        }
+        val after = editCell(bytes, tableBlockIndex(bytes), row = 0, col = 0, text = "Edited cell link")
+
+        XWPFDocument(ByteArrayInputStream(after)).use { doc ->
+            val run = doc.bodyElements.filterIsInstance<XWPFTable>().first()
+                .getRow(0).getCell(0).paragraphs[0].runs.first()
+            assertTrue("the rewritten text is a link again, was ${run.javaClass.simpleName}", run is XWPFHyperlinkRun)
+            assertEquals(
+                "https://example.com/cell",
+                doc.getHyperlinkByID((run as XWPFHyperlinkRun).getHyperlinkId())?.getURL(),
+            )
+        }
+    }
+
+    @Test
+    fun editACellThatHoldsAPartlyLinkedText_writesPlainTextAndDropsThePartialLink() {
+        // The grid model has no way to say which words of a cell were linked, so an edited
+        // part-linked cell becomes plain text. This is a documented limitation, not an
+        // accident: the assertion is here so the behaviour cannot change unnoticed.
+        val bytes = docx { doc ->
+            val t = doc.createTable(1, 1)
+            t.getRow(0).getCell(0).paragraphs[0].also { p ->
+                p.createRun().setText("See ")
+                p.createHyperlinkRun("https://example.com/docs").setText("the docs")
+            }
+        }
+        val after = editCell(bytes, tableBlockIndex(bytes), row = 0, col = 0, text = "See the updated docs")
+
+        XWPFDocument(ByteArrayInputStream(after)).use { doc ->
+            val runs = doc.bodyElements.filterIsInstance<XWPFTable>().first()
+                .getRow(0).getCell(0).paragraphs[0].runs
+            assertEquals("See the updated docs", runs.joinToString("") { it.text() })
+            assertTrue("no link is left behind", runs.none { it is XWPFHyperlinkRun })
+        }
+    }
+
+    // ---- Phase 4: content the editor cannot model ---------------------------
+
+    /** A non-default section: the page size and margins of a real document. */
+    private fun withSectionProperties(): ByteArray = docx { doc ->
+        doc.createParagraph().createRun().setText("Body")
+        val sect = doc.document.body.sectPr ?: doc.document.body.addNewSectPr()
+        (sect.pgSz ?: sect.addNewPgSz()).also {
+            it.setW(BigInteger.valueOf(11906))
+            it.setH(BigInteger.valueOf(16838))
+        }
+        (sect.pgMar ?: sect.addNewPgMar()).also {
+            it.setTop(BigInteger.valueOf(1440))
+            it.setLeft(BigInteger.valueOf(1800))
+        }
+    }
+
+    private fun section(bytes: ByteArray): String = XWPFDocument(ByteArrayInputStream(bytes)).use { doc ->
+        val sect = doc.document.body.sectPr
+        "${sect?.pgSz?.w}x${sect?.pgSz?.h} top=${sect?.pgMar?.top} left=${sect?.pgMar?.left}"
+    }
+
+    @Test
+    fun editParagraph_keepsSectionProperties() {
+        val bytes = withSectionProperties()
+        val before = section(bytes)
+        assertTrue("the fixture carries a custom page size, was $before", before.contains("11906"))
+        val index = blockIndex(bytes, "Body")
+        val after = WordDocument.applyEditsAndSerialize(bytes, mapOf(index to listOf(WordDocument.Run("Edited body"))))
+        assertEquals("the page setup survives the save", before, section(after))
+    }
+
+    /**
+     * A document whose XML carries content POI cannot generate: a tracked insertion, a
+     * tracked deletion and an inline content control. Built by rewriting the document part
+     * of a POI-written package, because POI has no API for any of the three.
+     */
+    private fun withUnmodelledXml(): ByteArray {
+        val bytes = docx { doc ->
+            doc.createParagraph().createRun().setText("Subject")
+            doc.createParagraph().createRun().setText("Elsewhere")
+        }
+        val before = part(bytes, "word/document.xml")
+        val injected = "<w:ins w:id=\"1\" w:author=\"tester\"><w:r><w:t>Inserted subject</w:t></w:r></w:ins>" +
+            "<w:del w:id=\"2\" w:author=\"tester\"><w:r><w:delText>Removed subject</w:delText></w:r></w:del>" +
+            "<w:sdt><w:sdtPr><w:id w:val=\"7\"/></w:sdtPr><w:sdtContent><w:r><w:t>Control subject</w:t></w:r></w:sdtContent></w:sdt>"
+        // Injected at the end of the first paragraph: the exact serialization of the run POI
+        // wrote is not stable enough to match on, the paragraph end tag is.
+        val end = before.indexOf("</w:p>")
+        check(end > 0) { "the fixture could not find the first paragraph" }
+        return withPart(bytes, "word/document.xml", before.substring(0, end) + injected + before.substring(end))
+    }
+
+    /** Replaces one part of a package, leaving every other entry as it was. */
+    private fun withPart(bytes: ByteArray, name: String, content: String): ByteArray {
+        val out = ByteArrayOutputStream()
+        ZipOutputStream(out).use { zip ->
+            ZipInputStream(ByteArrayInputStream(bytes)).use { input ->
+                while (true) {
+                    val entry = input.nextEntry ?: break
+                    zip.putNextEntry(ZipEntry(entry.name))
+                    zip.write((if (entry.name == name) content else input.readBytes()).toByteArray())
+                }
+            }
+        }
+        return out.toByteArray()
+    }
+
+    @Test
+    fun load_hidesTrackedDeletionsButKeepsThemInThePackage() {
+        val bytes = withUnmodelledXml()
+        val text = (WordDocument.read(bytes).blocks[0] as WordDocument.ParagraphBlock).text
+        assertFalse("deleted text is not editable text, was '$text'", text.contains("Removed subject"))
+        assertTrue("a tracked insertion is editable text", text.contains("Inserted subject"))
+        assertFalse("a content control stays outside the editable text, was '$text'", text.contains("Control subject"))
+        assertTrue("the content control is still in the package", part(bytes, "word/document.xml").contains("Control subject"))
+    }
+
+    @Test
+    fun editParagraphElsewhere_keepsTrackedChangesAndContentControls() {
+        val bytes = withUnmodelledXml()
+        val index = blockIndex(bytes, "Elsewhere")
+        val after = WordDocument.applyEditsAndSerialize(bytes, mapOf(index to listOf(WordDocument.Run("Edited elsewhere"))))
+        val xml = part(after, "word/document.xml")
+
+        assertTrue("the tracked insertion survives", xml.contains("<w:ins") && xml.contains("Inserted subject"))
+        assertTrue("the tracked deletion survives", xml.contains("<w:del") && xml.contains("Removed subject"))
+        assertTrue("the content control survives", xml.contains("<w:sdt>") && xml.contains("Control subject"))
+        assertEquals("the edit is saved", "Edited elsewhere", textOf(after, blockIndex(after, "Edited elsewhere")))
+    }
+
+    @Test
+    fun editingAParagraphWithATrackedDeletion_keepsTheDeletionIntact() {
+        val bytes = withUnmodelledXml()
+        val index = blockIndex(bytes, "Inserted subject")
+        val observed = (WordDocument.read(bytes).blocks[index] as WordDocument.ParagraphBlock).text
+        val after = WordDocument.applyEditsAndSerialize(bytes, mapOf(index to listOf(WordDocument.Run("$observed edited"))))
+        val xml = part(after, "word/document.xml")
+
+        assertTrue("the deletion mark and its hidden text survive", xml.contains("<w:del") && xml.contains("Removed subject"))
+        assertTrue("the edit is in the document", textOf(after, index).contains("edited"))
+        assertFalse(
+            "the hidden text did not become visible text",
+            (WordDocument.read(after).blocks[index] as WordDocument.ParagraphBlock).text.contains("Removed subject"),
         )
     }
 

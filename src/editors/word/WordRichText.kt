@@ -138,9 +138,9 @@ object WordRichText {
             styleAtChar(runs, (prefix - 1).coerceAtLeast(0))
         }
         val out = ArrayList<WordDocument.Run>()
-        out.addAll(sliceRuns(runs, 0, prefix))
+        out.addAll(WordDocument.sliceRuns(runs, 0, prefix))
         if (inserted.isNotEmpty()) out.add(WordDocument.Run(inserted, style))
-        out.addAll(sliceRuns(runs, oldEnd, old.length))
+        out.addAll(WordDocument.sliceRuns(runs, oldEnd, old.length))
         return collapse(out)
     }
 
@@ -173,11 +173,11 @@ object WordRichText {
         val out = ArrayList<WordDocument.Run>()
         var cursor = 0
         for (pos in positions) {
-            out.addAll(sliceRuns(runs, cursor, pos))
+            out.addAll(WordDocument.sliceRuns(runs, cursor, pos))
             if (replacement.isNotEmpty()) out.add(WordDocument.Run(replacement, styleAtChar(runs, pos)))
             cursor = pos + target.length
         }
-        out.addAll(sliceRuns(runs, cursor, text.length))
+        out.addAll(WordDocument.sliceRuns(runs, cursor, text.length))
         return collapse(out)
     }
 
@@ -193,23 +193,6 @@ object WordRichText {
         var i = 0
         while (i < max && a[a.length - 1 - i] == b[b.length - 1 - i]) i++
         return i
-    }
-
-    /** The part of [runs] between [from] and [to], split at those offsets. */
-    private fun sliceRuns(runs: List<WordDocument.Run>, from: Int, to: Int): List<WordDocument.Run> {
-        if (to <= from) return emptyList()
-        val out = ArrayList<WordDocument.Run>()
-        var pos = 0
-        for (run in runs) {
-            val start = pos
-            val end = pos + run.text.length
-            pos = end
-            if (end <= from || start >= to) continue
-            val a = (from - start).coerceIn(0, run.text.length)
-            val b = (to - start).coerceIn(0, run.text.length)
-            if (b > a) out.add(run.copy(text = run.text.substring(a, b)))
-        }
-        return out
     }
 
     /** The style of the run covering [index], or the last run's when past the end. */
