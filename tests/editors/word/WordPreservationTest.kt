@@ -1188,7 +1188,7 @@ class WordPreservationTest {
                 while (true) {
                     val entry = input.nextEntry ?: break
                     zip.putNextEntry(ZipEntry(entry.name))
-                    zip.write((if (entry.name == name) content else input.readBytes()).toByteArray())
+                    zip.write(if (entry.name == name) content.toByteArray() else input.readBytes())
                 }
             }
         }
