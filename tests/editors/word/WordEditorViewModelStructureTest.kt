@@ -395,9 +395,9 @@ class WordEditorViewModelStructureTest {
     }
 
     private companion object {
-        /** A valid 1x1 PNG (68 bytes, RGBA, non-interlaced), pinned so fixtures need no tooling. */
+        /** A valid 1x1 PNG (70 bytes, RGBA, non-interlaced), pinned so fixtures need no tooling. */
         const val PNG_1X1 =
-            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
 
         /** A second valid PNG, 1x2 red, so two pictures in one document can be told apart. */
         const val PNG_1X2 =

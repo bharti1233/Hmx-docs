@@ -1500,12 +1500,12 @@ class WordPreservationTest {
 
         val firstRemoved = WordDocument.applyEditsAndSerialize(bytes, blockOp = WordDocument.BlockOp.DeleteImage(index, 0))
         assertEquals(1, pictureCount(firstRemoved))
-        assertEquals("the second picture is the one that stayed", png2.size, pictureBytes(firstRemoved).single().size)
+        assertArrayEquals("the second picture is the one that stayed", png2, pictureBytes(firstRemoved).single())
         assertEquals("the caption is untouched", "Caption", paragraphTexts(firstRemoved).first())
 
         val secondRemoved = WordDocument.applyEditsAndSerialize(bytes, blockOp = WordDocument.BlockOp.DeleteImage(index, 1))
         assertEquals(1, pictureCount(secondRemoved))
-        assertEquals("the first picture is the one that stayed", png.size, pictureBytes(secondRemoved).single().size)
+        assertArrayEquals("the first picture is the one that stayed", png, pictureBytes(secondRemoved).single())
     }
 
     /**
@@ -1802,10 +1802,12 @@ class WordPreservationTest {
     private companion object {
         /**
          * A valid 1x1 PNG, generated once and pinned as base64 so fixtures never depend on
-         * image tooling. 68 bytes, RGBA, non-interlaced.
+         * image tooling. 70 bytes, RGBA, non-interlaced; checked against a real image reader,
+         * because bytes that only carry a PNG signature are accepted by the package writer and
+         * rejected the moment something tries to draw them.
          */
         const val PNG_1X1 =
-            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
 
         /**
          * A second valid PNG, different from [PNG_1X1] in its dimensions (1x2, red), so a test
