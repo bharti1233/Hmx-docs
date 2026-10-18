@@ -12,14 +12,17 @@ import org.apache.poi.xwpf.usermodel.XWPFHyperlinkRun
 import org.apache.poi.xwpf.usermodel.XWPFParagraph
 import org.apache.poi.xwpf.usermodel.XWPFRun
 import org.apache.poi.xwpf.usermodel.XWPFTable
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Ignore
 import org.junit.Test
 import org.openxmlformats.schemas.wordprocessingml.x2006.main.CTAbstractNum
+import org.openxmlformats.schemas.wordprocessingml.x2006.main.STMerge
 import org.openxmlformats.schemas.wordprocessingml.x2006.main.STNumberFormat
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
@@ -59,14 +62,25 @@ class WordPreservationTest {
 
     private val png = Base64.getDecoder().decode(PNG_1X1)
 
-    private fun addPicture(run: XWPFRun, name: String) {
+    private val png2 = Base64.getDecoder().decode(PNG_1X2)
+
+    private fun addPicture(run: XWPFRun, name: String, bytes: ByteArray = png) {
         run.addPicture(
-            ByteArrayInputStream(png),
+            ByteArrayInputStream(bytes),
             Document.PICTURE_TYPE_PNG,
             name,
             Units.toEMU(20.0),
             Units.toEMU(20.0),
         )
+    }
+
+    /** One paragraph holding two pictures that differ in size, so a removal can be told apart. */
+    private fun withTwoDistinctPictures(): ByteArray = docx { doc ->
+        doc.createParagraph().also { p ->
+            p.createRun().setText("Caption")
+            addPicture(p.createRun(), "first.png")
+            addPicture(p.createRun(), "second.png", png2)
+        }
     }
 
     /** Plain paragraphs: the baseline round trip. */
@@ -1244,6 +1258,537 @@ class WordPreservationTest {
         )
     }
 
+    // ---- Phase 5: paragraph structure, list levels, pictures -----------------
+
+    /** Body paragraphs (empty ones included), in document order. */
+    private fun paragraphTexts(bytes: ByteArray): List<String> =
+        XWPFDocument(ByteArrayInputStream(bytes)).use { doc ->
+            doc.bodyElements.filterIsInstance<XWPFParagraph>().map { it.text ?: "" }
+        }
+
+    /** Every embedded picture of the document, body paragraphs and table cells alike. */
+    private fun pictureCount(bytes: ByteArray): Int = XWPFDocument(ByteArrayInputStream(bytes)).use { doc ->
+        doc.bodyElements.filterIsInstance<XWPFParagraph>()
+            .sumOf { p -> p.runs.sumOf { run -> run.embeddedPictures.size } } +
+            doc.bodyElements.filterIsInstance<XWPFTable>()
+                .sumOf { table ->
+                    table.rows.sumOf { row ->
+                        row.tableCells.sumOf { cell ->
+                            cell.paragraphs.sumOf { p -> p.runs.sumOf { run -> run.embeddedPictures.size } }
+                        }
+                    }
+                }
+    }
+
+    /** How many times a piece of XML appears in the document part. */
+    private fun xmlCount(bytes: ByteArray, needle: String): Int =
+        part(bytes, "word/document.xml").split(needle).size - 1
+
+    private fun numberingDefinitionCount(bytes: ByteArray): Int =
+        part(bytes, "word/numbering.xml").split("<w:num ").size - 1
+
+    private fun gridColumns(bytes: ByteArray, nth: Int = 0): Int =
+        XWPFDocument(ByteArrayInputStream(bytes)).use { doc ->
+            doc.tables[nth].getCTTbl().getTblGrid()?.sizeOfGridColArray() ?: 0
+        }
+
+    private fun gridWidths(bytes: ByteArray, nth: Int = 0): List<Long> =
+        XWPFDocument(ByteArrayInputStream(bytes)).use { doc ->
+            doc.tables[nth].getCTTbl().getTblGrid()?.gridColList
+                ?.mapNotNull { (it.getW() as? Number)?.toLong() } ?: emptyList()
+        }
+
+    private fun rowCellCount(bytes: ByteArray, row: Int, nth: Int = 0): Int =
+        XWPFDocument(ByteArrayInputStream(bytes)).use { doc -> doc.tables[nth].getRow(row).tableCells.size }
+
+    private fun cellWidth(bytes: ByteArray, row: Int, col: Int): Long? =
+        XWPFDocument(ByteArrayInputStream(bytes)).use { doc ->
+            (doc.tables[0].getRow(row).getCell(col).getCTTc().getTcPr()?.getTcW()?.getW() as? Number)?.toLong()
+        }
+
+    private fun splitParagraph(bytes: ByteArray, index: Int, offset: Int): ByteArray =
+        WordDocument.applyEditsAndSerialize(bytes, blockOp = WordDocument.BlockOp.SplitParagraph(index, offset))
+
+    @Test
+    fun splitParagraph_movesTheTextAfterTheCaretIntoANewParagraph() {
+        val bytes = plain()
+        val after = splitParagraph(bytes, blockIndex(bytes, "First line"), offset = 5)
+
+        assertEquals(
+            listOf("First", " line", "Second line", "Third line"),
+            paragraphTexts(after),
+        )
+        assertEquals(
+            "not a character is lost",
+            paragraphTexts(bytes).joinToString(""),
+            paragraphTexts(after).joinToString(""),
+        )
+        assertEquals("the untouched paragraphs keep their formatting", snapshot(bytes).blocks.last(), snapshot(after).blocks.last())
+    }
+
+    @Test
+    fun splitParagraph_keepsTheRunFormattingOfBothHalves() {
+        val bytes = docx { doc ->
+            doc.createParagraph().also { p ->
+                p.createRun().also { r -> r.setText("Bold part"); r.isBold = true }
+                p.createRun().also { r -> r.setText(" and plain"); r.isItalic = true }
+            }
+        }
+        val after = splitParagraph(bytes, 0, offset = 9)
+        val blocks = WordDocument.read(after).blocks.filterIsInstance<WordDocument.ParagraphBlock>()
+
+        assertEquals(listOf("Bold part", " and plain"), blocks.map { it.text })
+        assertTrue("the first half keeps its bold run", blocks[0].runs.any { it.style.bold && it.text == "Bold part" })
+        assertTrue("the second half keeps its italic run", blocks[1].runs.any { it.style.italic && it.text == " and plain" })
+    }
+
+    @Test
+    fun splitParagraph_keepsTheListAndDoesNotInventADefinition() {
+        val bytes = lists()
+        val definitionsBefore = numberingDefinitionCount(bytes)
+        assertTrue("the fixture has numbering definitions", definitionsBefore > 0)
+        val index = blockIndex(bytes, "Numbered one")
+        val after = splitParagraph(bytes, index, offset = 4)
+
+        val halves = WordDocument.read(after).blocks.filterIsInstance<WordDocument.ParagraphBlock>()
+            .filter { it.text == "Numb" || it.text == "ered one" }
+        assertEquals("both halves are separate blocks", 2, halves.size)
+        assertTrue("both halves are numbered", halves.all { it.props.listType == WordDocument.ListType.NUMBER })
+        val ids = XWPFDocument(ByteArrayInputStream(after)).use { doc ->
+            doc.paragraphs.filter { it.text == "Numb" || it.text == "ered one" }.map { it.numID }
+        }
+        assertEquals("the two halves stay in one list", 1, ids.distinct().size)
+        assertEquals("no numbering definition was invented", definitionsBefore, numberingDefinitionCount(after))
+        assertEquals("the other lists are untouched", WordDocument.ListType.BULLET, listTypeOf(after, "Bullet one"))
+        assertEquals("the restarted list keeps its own id", WordDocument.ListType.NUMBER, listTypeOf(after, "Restarted one"))
+    }
+
+    @Test
+    fun splitParagraphAtTheEnd_addsAnEmptyParagraphAfterTheText() {
+        val bytes = plain()
+        val after = splitParagraph(bytes, blockIndex(bytes, "First line"), offset = "First line".length)
+
+        assertEquals(listOf("First line", "", "Second line", "Third line"), paragraphTexts(after))
+    }
+
+    @Test
+    fun splitParagraphWithAPicture_keepsThePictureAndTheTextAroundIt() {
+        val bytes = withImages()
+        val picturesBefore = pictureCount(bytes)
+        val after = splitParagraph(bytes, blockIndex(bytes, "Caption"), offset = 3)
+
+        assertEquals(listOf("Cap", "tion"), paragraphTexts(after).take(2))
+        assertEquals("every picture is still in the document", picturesBefore, pictureCount(after))
+        assertEquals("the pictures still read back", photos(bytes).size, photos(after).size)
+    }
+
+    private fun photos(bytes: ByteArray): List<WordDocument.ImageBlock> =
+        WordDocument.read(bytes).blocks.filterIsInstance<WordDocument.ImageBlock>()
+
+    @Test
+    fun insertParagraph_takesTheFormattingOfTheNearestParagraph() {
+        val bytes = mixed()
+        val after = WordDocument.applyEditsAndSerialize(
+            bytes,
+            blockOp = WordDocument.BlockOp.InsertParagraph(after = 0, inheritFrom = 0),
+        )
+        val blocks = WordDocument.read(after).blocks.filterIsInstance<WordDocument.ParagraphBlock>()
+        assertEquals("the new paragraph is empty", "", blocks[1].text)
+        assertEquals("it carries the heading style of the paragraph above", WordDocument.Kind.HEADING1, blocks[1].props.kind)
+        assertEquals("the heading itself is untouched", "Title", blocks[0].text)
+
+        val top = WordDocument.applyEditsAndSerialize(
+            bytes,
+            blockOp = WordDocument.BlockOp.InsertParagraph(after = -1, inheritFrom = -1),
+        )
+        assertEquals("", paragraphTexts(top).first())
+        assertEquals(
+            "a paragraph at the top takes the document defaults",
+            WordDocument.Kind.BODY,
+            WordDocument.read(top).blocks.filterIsInstance<WordDocument.ParagraphBlock>().first().props.kind,
+        )
+    }
+
+    @Test
+    fun mergeWithPrevious_joinsTheTextAndKeepsTheFirstParagraphsProperties() {
+        val bytes = docx { doc ->
+            doc.createParagraph().also { p ->
+                p.style = "Heading1"
+                p.createRun().setText("Keep")
+            }
+            doc.createParagraph().also { p -> p.createRun().also { r -> r.setText(" merged"); r.isItalic = true } }
+        }
+        val after = WordDocument.applyEditsAndSerialize(bytes, blockOp = WordDocument.BlockOp.MergeWithPrevious(1))
+        val block = WordDocument.read(after).blocks.filterIsInstance<WordDocument.ParagraphBlock>().single()
+
+        assertEquals("Keep merged", block.text)
+        assertEquals("the paragraph that stays keeps its style", WordDocument.Kind.HEADING1, block.props.kind)
+        assertTrue("the run that moved keeps its italic", block.runs.any { it.text == " merged" && it.style.italic })
+    }
+
+    @Test
+    fun mergeWithPrevious_keepsThePictureOfTheParagraphItRemoves() {
+        val bytes = docx { doc ->
+            doc.createParagraph().createRun().setText("Text")
+            doc.createParagraph().also { p -> addPicture(p.createRun(), "merged.png") }
+        }
+        val after = WordDocument.applyEditsAndSerialize(bytes, blockOp = WordDocument.BlockOp.MergeWithPrevious(1))
+
+        assertEquals("the paragraph is gone", listOf("Text"), paragraphTexts(after))
+        assertEquals("its picture moved into the paragraph that stayed", 1, pictureCount(after))
+    }
+
+    @Test
+    fun mergeWithPrevious_refusesWhenTheBlockBeforeIsNotAParagraph() {
+        val bytes = withTable()
+        val index = blockIndex(bytes, "After table")
+
+        val refused = runCatching {
+            WordDocument.applyEditsAndSerialize(bytes, blockOp = WordDocument.BlockOp.MergeWithPrevious(index))
+        }.isFailure
+
+        assertTrue("merging across a table is refused", refused)
+    }
+
+    @Test
+    fun deleteBlock_removesTheParagraphFromTheDocumentAndKeepsTheRest() {
+        val bytes = mixed()
+        val before = snapshot(bytes)
+        val index = blockIndex(bytes, "Body line")
+        val after = WordDocument.applyEditsAndSerialize(bytes, blockOp = WordDocument.BlockOp.DeleteBlock(index))
+
+        assertFalse("the paragraph is out of the XML", part(after, "word/document.xml").contains("Body line"))
+        assertEquals("everything else stays in order", before.blocks.filter { !it.contains("Body line") }, snapshot(after).blocks)
+        assertEquals("the table cell text is untouched", "L|", tableGrid(after).first().joinToString("|"))
+        assertTrue("the field is still there", part(after, "word/document.xml").contains("PAGE"))
+        assertEquals("the pictures are untouched", before.pictures, snapshot(after).pictures)
+    }
+
+    @Test
+    fun deleteBlock_refusesToLeaveTheBodyEmpty() {
+        val bytes = docx { doc -> doc.createParagraph().createRun().setText("Only paragraph") }
+
+        val refused = runCatching {
+            WordDocument.applyEditsAndSerialize(bytes, blockOp = WordDocument.BlockOp.DeleteBlock(0))
+        }.isFailure
+
+        assertTrue("the last block of a document cannot be removed", refused)
+    }
+
+    @Test
+    fun aBlockOpWithAStaleIndex_failsInsteadOfChangingTheWrongBlock() {
+        val bytes = plain()
+
+        assertTrue(
+            "splitting a block that does not exist is refused",
+            runCatching { splitParagraph(bytes, 9, 0) }.isFailure,
+        )
+        assertTrue(
+            "deleting a block that does not exist is refused",
+            runCatching {
+                WordDocument.applyEditsAndSerialize(bytes, blockOp = WordDocument.BlockOp.DeleteBlock(5))
+            }.isFailure,
+        )
+    }
+
+    @Test
+    fun deletingOnePicture_removesExactlyThatDrawing() {
+        val bytes = withTwoDistinctPictures()
+        val index = WordDocument.read(bytes).blocks.indexOfFirst { it is WordDocument.ImageBlock }
+        val ordinals = WordDocument.read(bytes).blocks.filterIsInstance<WordDocument.ImageBlock>().map { it.ordinal }
+        assertEquals("the pictures of the paragraph are numbered in order", listOf(0, 1), ordinals)
+
+        val firstRemoved = WordDocument.applyEditsAndSerialize(bytes, blockOp = WordDocument.BlockOp.DeleteImage(index, 0))
+        assertEquals(1, pictureCount(firstRemoved))
+        assertEquals("the second picture is the one that stayed", png2.size, pictureBytes(firstRemoved).first().size)
+        assertEquals("the caption is untouched", "Caption", paragraphTexts(firstRemoved).first())
+
+        val secondRemoved = WordDocument.applyEditsAndSerialize(bytes, blockOp = WordDocument.BlockOp.DeleteImage(index, 1))
+        assertEquals(1, pictureCount(secondRemoved))
+        assertEquals("the first picture is the one that stayed", png.size, pictureBytes(secondRemoved).first().size)
+    }
+
+    private fun pictureBytes(bytes: ByteArray): List<ByteArray> =
+        XWPFDocument(ByteArrayInputStream(bytes)).use { doc -> doc.allPictures.map { it.data } }
+
+    @Test
+    fun aPictureThatDoesNotExistIsRefusedInsteadOfRemovingSomethingElse() {
+        val bytes = withTwoDistinctPictures()
+        val index = WordDocument.read(bytes).blocks.indexOfFirst { it is WordDocument.ImageBlock }
+
+        val refused = runCatching {
+            WordDocument.applyEditsAndSerialize(bytes, blockOp = WordDocument.BlockOp.DeleteImage(index, 4))
+        }.isFailure
+
+        assertTrue("removing a picture that is not there is refused", refused)
+        assertEquals("and nothing was removed", 2, pictureCount(bytes))
+    }
+
+    @Test
+    fun insertPicture_addsThePartInOrderAndInlinesTheBytes() {
+        val bytes = plain()
+        val after = WordDocument.applyEditsAndSerialize(
+            bytes,
+            blockOp = WordDocument.BlockOp.InsertImage(
+                after = 0,
+                bytes = png,
+                fileName = "shot.png",
+                widthEmu = 40 * 9525,
+                heightEmu = 20 * 9525,
+            ),
+        )
+
+        assertEquals(
+            "the picture sits in a paragraph of its own after the caret's block",
+            listOf("First line", "", "Second line", "Third line"),
+            paragraphTexts(after),
+        )
+        assertEquals(1, pictureCount(after))
+        val stored = pictureBytes(after).single()
+        assertArrayEquals("the stored bytes are the picked file", png, stored)
+        XWPFDocument(ByteArrayInputStream(after)).use { doc ->
+            val drawing = doc.paragraphs[1].runs.first().getCTR().getDrawingArray(0)
+            assertEquals("the picture is inline", 1, drawing.sizeOfInlineArray())
+        }
+    }
+
+    @Test
+    fun insertPicture_keepsUnrelatedContentOfTheDocument() {
+        val bytes = withHeaderAndFooter()
+        val after = WordDocument.applyEditsAndSerialize(
+            bytes,
+            blockOp = WordDocument.BlockOp.InsertImage(0, png, "shot.png", 40 * 9525, 20 * 9525),
+        )
+        val snapshotAfter = snapshot(after)
+
+        assertEquals(listOf("Header text"), snapshotAfter.headers)
+        assertEquals(listOf("Footer text"), snapshotAfter.footers)
+        assertEquals("the paragraph the picture followed is still there", "Body", paragraphTexts(after).first())
+    }
+
+    // ---- Phase 5: list levels -------------------------------------------------
+
+    private fun applyProps(bytes: ByteArray, index: Int, update: WordDocument.ParaPropsUpdate): ByteArray =
+        WordDocument.applyEditsAndSerialize(bytes, paraProps = mapOf(index to update))
+
+    @Test
+    fun listLevel_movesTheItemToARealNumberingLevel() {
+        val bytes = lists()
+        val index = blockIndex(bytes, "Numbered two")
+        val numIdBefore = XWPFDocument(ByteArrayInputStream(bytes)).use { doc ->
+            doc.paragraphs.first { it.text == "Numbered two" }.numID
+        }
+
+        val after = applyProps(bytes, index, WordDocument.ParaPropsUpdate(listLevel = 1))
+        val block = WordDocument.read(after).blocks.filterIsInstance<WordDocument.ParagraphBlock>()
+            .first { it.text == "Numbered two" }
+
+        assertEquals("the level is read back", 1, block.props.listLevel)
+        assertEquals("it is still one list item", WordDocument.ListType.NUMBER, block.props.listType)
+        val numIdAfter = XWPFDocument(ByteArrayInputStream(after)).use { doc ->
+            doc.paragraphs.first { it.text == "Numbered two" }.numID
+        }
+        assertEquals("the item was not moved to another list", numIdBefore, numIdAfter)
+        val ilvl = XWPFDocument(ByteArrayInputStream(after)).use { doc ->
+            doc.paragraphs.first { it.text == "Numbered two" }.numIlvl
+        }
+        assertEquals("the level is written as w:ilvl", 1, ilvl?.toInt())
+        assertEquals("the level is real list structure, not indentation", 0, block.props.indentTwips)
+    }
+
+    @Test
+    fun listLevelBeyondTheDefinition_fallsBackToTheDeepestLevelItHas() {
+        val bytes = lists()
+        val index = blockIndex(bytes, "Numbered one")
+
+        val after = applyProps(bytes, index, WordDocument.ParaPropsUpdate(listLevel = 8))
+        val block = WordDocument.read(after).blocks.filterIsInstance<WordDocument.ParagraphBlock>()
+            .first { it.text == "Numbered one" }
+
+        assertEquals("the fixture list has two levels", 1, block.props.maxListLevel)
+        assertEquals("the item goes to the deepest level there is", 1, block.props.listLevel)
+    }
+
+    @Test
+    fun indentingAPlainParagraph_stillMovesItsOwnIndentation() {
+        val bytes = plain()
+        val index = blockIndex(bytes, "Second line")
+
+        val after = applyProps(bytes, index, WordDocument.ParaPropsUpdate(indentTwips = 720))
+        val block = WordDocument.read(after).blocks.filterIsInstance<WordDocument.ParagraphBlock>()
+            .first { it.text == "Second line" }
+
+        assertEquals("no list was invented for it", WordDocument.ListType.NONE, block.props.listType)
+        assertEquals("the indentation is written", 720, block.props.indentTwips)
+        assertNull(
+            "and no numbering reference was added",
+            XWPFDocument(ByteArrayInputStream(after)).use { doc -> doc.paragraphs[1].numID },
+        )
+    }
+
+    // ---- Phase 5: table structure --------------------------------------------
+
+    private fun tableWithWidths(): ByteArray = docx { doc ->
+        doc.createParagraph().createRun().setText("Intro")
+        val t = doc.createTable(2, 2)
+        t.getRow(0).getCell(0).setText("A1")
+        t.getRow(0).getCell(1).setText("B1")
+        t.getRow(1).getCell(0).setText("A2")
+        t.getRow(1).getCell(1).setText("B2")
+        t.getCTTbl().addNewTblGrid().also { grid ->
+            grid.addNewGridCol().setW(BigInteger.valueOf(3000))
+            grid.addNewGridCol().setW(BigInteger.valueOf(3000))
+        }
+        t.rows.forEach { row ->
+            row.tableCells.forEach { cell ->
+                cell.getCTTc().addNewTcPr().addNewTcW().setW(BigInteger.valueOf(3000))
+            }
+        }
+    }
+
+    @Test
+    fun deletingATableColumn_keepsTheGridInStepWithTheCells() {
+        val bytes = tableWithWidths()
+        val index = tableBlockIndex(bytes)
+        val after = WordDocument.applyEditsAndSerialize(
+            bytes,
+            tableEdits = mapOf(index to tableGrid(bytes).map { row -> row.dropLast(1) }),
+        )
+
+        assertEquals("the cell is gone from the row", 1, rowCellCount(after, 0))
+        assertEquals("the grid description follows", 1, gridColumns(after))
+        assertEquals("and keeps the width of the column that stayed", listOf(3000L), gridWidths(after))
+    }
+
+    @Test
+    fun addingATableColumn_addsAGridColumnAndGivesTheCellItsNeighboursWidth() {
+        val bytes = tableWithWidths()
+        val index = tableBlockIndex(bytes)
+        val after = WordDocument.applyEditsAndSerialize(
+            bytes,
+            tableEdits = mapOf(index to tableGrid(bytes).map { row -> row + "" }),
+        )
+
+        assertEquals("the new cell is in the row", 3, rowCellCount(after, 0))
+        assertEquals("the grid describes three columns", 3, gridColumns(after))
+        assertEquals("with the width of the column it was added beside", listOf(3000L, 3000L, 3000L), gridWidths(after))
+        assertEquals("the new cell carries a width too", 3000L, cellWidth(after, 1, 2))
+        assertEquals("the existing cells keep their text", listOf("A1", "B1", ""), tableGrid(after).first())
+    }
+
+    /** A table whose first row spans two columns and whose first cell is merged downwards. */
+    private fun mergedTable(): ByteArray = docx { doc ->
+        doc.createParagraph().createRun().setText("Intro")
+        val t = doc.createTable(2, 3)
+        t.getRow(0).getCell(0).setText("Spanning")
+        t.getRow(0).getCell(0).getCTTc().addNewTcPr().addNewGridSpan().setVal(BigInteger.valueOf(2))
+        t.getRow(0).removeCell(1)
+        t.getRow(1).getCell(0).setText("Lower")
+        t.getRow(1).getCell(0).getCTTc().addNewTcPr().addNewVMerge().setVal(STMerge.RESTART)
+        t.getRow(1).getCell(1).setText("Plain")
+    }
+
+    @Test
+    fun aMergedTable_isReadAsMerged() {
+        val tables = WordDocument.read(mergedTable()).blocks.filterIsInstance<WordDocument.TableBlock>()
+        assertTrue("the span is reported", tables.single().merged)
+        assertFalse("a plain table is not", WordDocument.read(withTable()).blocks.filterIsInstance<WordDocument.TableBlock>().single().merged)
+    }
+
+    @Test
+    fun aMergedTable_keepsItsSpansThroughSavesAndCellEdits() {
+        val bytes = mergedTable()
+        val index = tableBlockIndex(bytes)
+        val untouched = WordDocument.applyEditsAndSerialize(bytes)
+
+        assertTrue("the span survives a save with no edits", xmlCount(untouched, "w:gridSpan") > 0)
+        assertTrue("the vertical merge survives too", xmlCount(untouched, "w:vMerge") > 0)
+
+        val edited = editCell(untouched, index, row = 1, col = 1, text = "Plain edited")
+        assertTrue("the span survives a text edit", xmlCount(edited, "w:gridSpan") > 0)
+        assertTrue("the merge survives a text edit", xmlCount(edited, "w:vMerge") > 0)
+        assertEquals("the text landed", "Plain edited", tableGrid(edited).last()[1])
+        assertEquals("the grid was left alone", 3, gridColumns(edited))
+        assertTrue("the table is still reported as merged", WordDocument.read(edited).blocks.filterIsInstance<WordDocument.TableBlock>().single().merged)
+    }
+
+    @Test
+    fun aMergedTable_refusesRowAndColumnChanges() {
+        val bytes = mergedTable()
+        val index = tableBlockIndex(bytes)
+        val grid = tableGrid(bytes)
+
+        val wider = runCatching {
+            WordDocument.applyEditsAndSerialize(bytes, tableEdits = mapOf(index to grid.map { row -> row + "" }))
+        }.isFailure
+        val shorter = runCatching {
+            WordDocument.applyEditsAndSerialize(bytes, tableEdits = mapOf(index to grid.dropLast(1)))
+        }.isFailure
+
+        assertTrue("adding a column to a merged table is refused", wider)
+        assertTrue("removing a row from a merged table is refused", shorter)
+    }
+
+    // ---- Phase 5: unmodelled content around structural edits ------------------
+
+    @Test
+    fun aSplitInADocumentWithTrackedChangesAndContentControls_keepsThemAll() {
+        val bytes = withUnmodelledXml()
+        val after = splitParagraph(bytes, blockIndex(bytes, "Elsewhere"), offset = 4)
+        val xml = part(after, "word/document.xml")
+
+        assertTrue("the tracked insertion survives", xml.contains("<w:ins") && xml.contains("Inserted subject"))
+        assertTrue("the tracked deletion survives", xml.contains("<w:del") && xml.contains("Removed subject"))
+        assertTrue("the content control survives", xml.contains("<w:sdt>") && xml.contains("Control subject"))
+        assertTrue("the split happened", paragraphTexts(after).contains("Else"))
+        assertTrue("and the rest of the text is still there", paragraphTexts(after).contains("where"))
+    }
+
+    @Test
+    fun splittingAParagraphThatEndsASection_doesNotDuplicateTheSectionBreak() {
+        val bytes = docx { doc ->
+            doc.createParagraph().also { p ->
+                p.createRun().setText("Section one")
+                val pPr = p.getCTP().getPPr() ?: p.getCTP().addNewPPr()
+                pPr.addNewSectPr().addNewPgSz().setW(BigInteger.valueOf(12240))
+            }
+            doc.createParagraph().createRun().setText("Section two")
+        }
+        val breaksBefore = xmlCount(bytes, "<w:sectPr")
+
+        val after = splitParagraph(bytes, 0, offset = 7)
+
+        assertEquals("exactly one section break, as before", breaksBefore, xmlCount(after, "<w:sectPr"))
+        assertEquals(listOf("Section", " one", "Section two"), paragraphTexts(after))
+    }
+
+    @Test
+    fun aSplitInADocumentWithPageSetup_keepsThePageSetup() {
+        val bytes = withSectionProperties()
+        val before = section(bytes)
+        val after = splitParagraph(bytes, blockIndex(bytes, "Body"), offset = 2)
+
+        assertEquals("the page setup survives", before, section(after))
+        assertTrue("the split happened", paragraphTexts(after).contains("Bo"))
+    }
+
+    @Test
+    fun deletingAParagraphInADocumentWithAHeaderAndFooter_keepsThem() {
+        val bytes = docx { doc ->
+            doc.createParagraph().createRun().setText("Body")
+            doc.createParagraph().createRun().setText("Extra")
+            doc.createHeader(HeaderFooterType.DEFAULT).createParagraph().createRun().setText("Header text")
+            doc.createFooter(HeaderFooterType.DEFAULT).createParagraph().createRun().setText("Footer text")
+        }
+        val index = blockIndex(bytes, "Extra")
+
+        val after = snapshot(WordDocument.applyEditsAndSerialize(bytes, blockOp = WordDocument.BlockOp.DeleteBlock(index)))
+
+        assertEquals(listOf("Header text"), after.headers)
+        assertEquals(listOf("Footer text"), after.footers)
+        assertEquals(listOf("Body"), after.blocks)
+    }
+
     private companion object {
         /**
          * A valid 1x1 PNG, generated once and pinned as base64 so fixtures never depend on
@@ -1251,6 +1796,13 @@ class WordPreservationTest {
          */
         const val PNG_1X1 =
             "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="
+
+        /**
+         * A second valid PNG, different from [PNG_1X1] in its dimensions (1x2, red), so a test
+         * can tell which of two pictures was removed.
+         */
+        const val PNG_1X2 =
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAACCAIAAAAW4yFwAAAADklEQVR4nGP4z8DAAMQACf4B/4PiLjgAAAAASUVORK5CYII="
 
         val LONG_TEXT = "long paragraph content ".repeat(120).trim()
     }

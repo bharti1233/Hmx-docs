@@ -1,5 +1,7 @@
 package dev.kern.editors.word
 
+import org.apache.poi.common.usermodel.PictureType
+import org.apache.poi.xwpf.usermodel.IBodyElement
 import org.apache.poi.xwpf.usermodel.ParagraphAlignment
 import org.apache.poi.xwpf.usermodel.UnderlinePatterns
 import org.apache.poi.xwpf.usermodel.XWPFAbstractNum
@@ -10,7 +12,15 @@ import org.apache.poi.xwpf.usermodel.XWPFParagraph
 import org.apache.poi.xwpf.usermodel.XWPFRun
 import org.apache.poi.xwpf.usermodel.XWPFTable
 import org.apache.poi.xwpf.usermodel.XWPFTableCell
+import org.apache.poi.xwpf.usermodel.XWPFTableRow
+import org.apache.xmlbeans.XmlCursor
+import org.apache.xmlbeans.XmlObject
 import org.openxmlformats.schemas.wordprocessingml.x2006.main.CTAbstractNum
+import org.openxmlformats.schemas.wordprocessingml.x2006.main.CTP
+import org.openxmlformats.schemas.wordprocessingml.x2006.main.CTPPr
+import org.openxmlformats.schemas.wordprocessingml.x2006.main.CTSdtBlock
+import org.openxmlformats.schemas.wordprocessingml.x2006.main.CTTbl
+import org.openxmlformats.schemas.wordprocessingml.x2006.main.CTTcPr
 import org.openxmlformats.schemas.wordprocessingml.x2006.main.STNumberFormat
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
@@ -74,6 +84,10 @@ object WordDocument {
         val styleId: String? = null,
         val align: Align = Align.START,
         val listType: ListType = ListType.NONE,
+        /** The `w:ilvl` of a numbered or bulleted paragraph: 0 is the outermost level. */
+        val listLevel: Int = 0,
+        /** The highest list level the paragraph's own numbering definition offers; 0 when there is none. */
+        val maxListLevel: Int = 0,
         val indentTwips: Int = 0,
     )
 
@@ -82,6 +96,7 @@ object WordDocument {
         val kind: Kind? = null,
         val align: Align? = null,
         val listType: ListType? = null,
+        val listLevel: Int? = null,
         val indentTwips: Int? = null,
     )
 
@@ -100,22 +115,77 @@ object WordDocument {
     /**
      * An editable table represented as a 2D grid of cell strings. A cell's paragraphs are
      * the lines of its string, so a cell holding more than one paragraph can be edited.
+     *
+     * [merged] marks a table whose cells span columns or are merged vertically. The flat
+     * grid cannot describe that, and rewriting a grid from it would drop the spans, so such
+     * a table can only be edited cell by cell (the structure is left alone).
      */
-    data class TableBlock(val rows: List<List<String>>) : Block
+    data class TableBlock(val rows: List<List<String>>, val merged: Boolean = false) : Block
 
-    /** An embedded raster image from the document. */
-    data class ImageBlock(val bytes: ByteArray, val fileName: String? = null) : Block {
+    /**
+     * An embedded raster image from the document. [ordinal] is the picture's position among
+     * the pictures of the paragraph it lives in, which is how a single one of them can be
+     * addressed when the editor removes it.
+     */
+    data class ImageBlock(val bytes: ByteArray, val fileName: String? = null, val ordinal: Int = 0) : Block {
         override fun equals(other: Any?): Boolean {
             if (this === other) return true
             if (other !is ImageBlock) return false
-            return bytes.contentEquals(other.bytes) && fileName == other.fileName
+            return bytes.contentEquals(other.bytes) && fileName == other.fileName && ordinal == other.ordinal
         }
 
-        override fun hashCode(): Int = 31 * bytes.contentHashCode() + (fileName?.hashCode() ?: 0)
+        override fun hashCode(): Int =
+            (31 * bytes.contentHashCode() + (fileName?.hashCode() ?: 0)) * 31 + ordinal
     }
 
     /** Passthrough for unmodeled XML structures. Never rewritten. */
     data object OpaqueBlock : Block
+
+    /**
+     * One block-level change, applied to the document in the same pass as the text edits of a
+     * save. The result is read back into the model, so no index has to survive a structural
+     * change and no operation is ever replayed twice; the indices name the layout that was
+     * parsed, with content edits of the same pass already applied.
+     */
+    sealed interface BlockOp {
+
+        /**
+         * Split the paragraph block at [at] at character [offset]. The two halves keep the
+         * paragraph's formatting (including its list), the text before the caret stays in the
+         * original element, and the text from [offset] on moves into a new paragraph.
+         */
+        data class SplitParagraph(val at: Int, val offset: Int) : BlockOp
+
+        /**
+         * Insert an empty paragraph after block [after], carrying the formatting of block
+         * [inheritFrom] (-1 for the document defaults). [after] of -1 inserts at the top.
+         */
+        data class InsertParagraph(val after: Int, val inheritFrom: Int = after) : BlockOp
+
+        /**
+         * Append the runs of block [at] to the paragraph before it and remove the block; the
+         * properties of the first paragraph stay in force, as when a paragraph mark is deleted.
+         */
+        data class MergeWithPrevious(val at: Int) : BlockOp
+
+        /** Remove block [at] (and, for a paragraph, everything inline in it). */
+        data class DeleteBlock(val at: Int) : BlockOp
+
+        /** Remove drawing [ordinal] of the paragraph behind block [at]. */
+        data class DeleteImage(val at: Int, val ordinal: Int) : BlockOp
+
+        /**
+         * Insert an inline picture after block [after] (-1 for the top), sized
+         * [widthEmu] x [heightEmu]; the picture data becomes a package part of its own.
+         */
+        data class InsertImage(
+            val after: Int,
+            val bytes: ByteArray,
+            val fileName: String?,
+            val widthEmu: Int,
+            val heightEmu: Int,
+        ) : BlockOp
+    }
 
     /** Block with no body element behind it: the placeholder block of an empty document. */
     private const val UNMAPPED = -1
@@ -182,6 +252,7 @@ object WordDocument {
         edits: Map<Int, List<Run>> = emptyMap(),
         paraProps: Map<Int, ParaPropsUpdate> = emptyMap(),
         tableEdits: Map<Int, List<List<String>>> = emptyMap(),
+        blockOp: BlockOp? = null,
     ): ByteArray {
         // Resolve every block index through the layout read() produced: pictures and
         // unmodelled elements add or reorder blocks, so a block index is not a body index.
@@ -233,6 +304,9 @@ object WordDocument {
                             }
                         }
                     }
+                    // After the list reference, so a paragraph that was just put into a list
+                    // can also be moved to one of its levels in the same pass.
+                    update.listLevel?.let { level -> writeListLevel(doc, paragraph, level) }
                 }
             }
 
@@ -242,8 +316,18 @@ object WordDocument {
                     ?: throw IllegalStateException("Table block $index does not exist in this document")
                 val table = elements.getOrNull(elementIndex) as? XWPFTable
                     ?: throw IllegalStateException("Table block $index does not resolve to a table")
+                // A merged cell is a span, which a flat grid of strings cannot put back. Text
+                // edits keep the shape and go through; a row or column change is refused
+                // rather than written over the spans.
+                if (hasMergedCells(table) && !sameShape(table, newGrid)) {
+                    throw IllegalStateException("A table with merged cells cannot have rows or columns changed")
+                }
                 writeTable(doc, table, newGrid)
             }
+
+            // A block-level change comes last: it sees the text and property edits above,
+            // which is what makes an Enter press split the paragraph at the caret's text.
+            blockOp?.let { applyBlockOp(doc, elements, elementIndices, edits, it) }
 
             ByteArrayOutputStream().use { out ->
                 doc.write(out)
@@ -251,6 +335,193 @@ object WordDocument {
             }
         }
     }
+
+    // ---- Block-Level Operations ---------------------------------------------
+
+    /**
+     * Applies one block-level change to the open document. It runs after the text and property
+     * edits of the same pass, so a split at a caret offset sees the text as edited.
+     *
+     * The document is serialized straight after, so the work is done through the objects of
+     * this parse; the caller re-reads the bytes and no index has to survive the change.
+     */
+    private fun applyBlockOp(
+        doc: XWPFDocument,
+        elements: List<IBodyElement>,
+        elementIndices: List<Int>,
+        edits: Map<Int, List<Run>>,
+        op: BlockOp,
+    ) {
+        val objects = bodyObjects(doc)
+
+        fun elementIndexOf(block: Int): Int = elementIndices.getOrNull(block)
+            ?: throw IllegalStateException("Block $block does not exist in this document")
+
+        fun paragraphAt(block: Int): XWPFParagraph {
+            val elementIndex = elementIndexOf(block)
+            return elements.getOrNull(elementIndex) as? XWPFParagraph
+                ?: throw IllegalStateException("Block $block does not resolve to a paragraph")
+        }
+
+        when (op) {
+            is BlockOp.SplitParagraph -> {
+                val paragraph = paragraphAt(op.at)
+                val runs = edits[op.at] ?: readParagraph(paragraph, doc).runs
+                val length = runs.sumOf { it.text.length }
+                val offset = op.offset.coerceIn(0, length)
+                val added = insertParagraph(doc, objects, elementIndexOf(op.at))
+                copyParagraphProperties(paragraph, added)
+                writeRuns(paragraph, sliceRuns(runs, 0, offset))
+                writeRuns(added, sliceRuns(runs, offset, length))
+            }
+
+            is BlockOp.InsertParagraph -> {
+                val added = insertParagraph(doc, objects, if (op.after < 0) -1 else elementIndexOf(op.after))
+                val source = elementIndices.getOrNull(op.inheritFrom)
+                    ?.takeIf { op.inheritFrom >= 0 }
+                    ?.let { elements.getOrNull(it) as? XWPFParagraph }
+                if (source != null) copyParagraphProperties(source, added)
+            }
+
+            is BlockOp.MergeWithPrevious -> {
+                val paragraph = paragraphAt(op.at)
+                val previous = paragraphAt(op.at - 1)
+                val previousRuns = edits[op.at - 1] ?: readParagraph(previous, doc).runs
+                val runs = edits[op.at] ?: readParagraph(paragraph, doc).runs
+                writeRuns(previous, previousRuns + runs)
+                // What the editor cannot write as text (a picture, a field) would go down with
+                // the paragraph mark, so it is moved into the paragraph that survives.
+                moveUnmodelledRuns(paragraph, previous)
+                removeElement(doc, elementIndexOf(op.at))
+            }
+
+            is BlockOp.DeleteBlock -> removeElement(doc, elementIndexOf(op.at))
+
+            is BlockOp.DeleteImage -> {
+                val run = drawingsOf(paragraphAt(op.at)).getOrNull(op.ordinal)
+                    ?: throw IllegalStateException("Picture ${op.ordinal} does not exist in block ${op.at}")
+                run.first.getCTR()?.removeDrawing(run.second)
+            }
+
+            is BlockOp.InsertImage -> {
+                if (op.bytes.isEmpty()) throw IllegalStateException("The picture has no data")
+                val holder = insertParagraph(doc, objects, if (op.after < 0) -1 else elementIndexOf(op.after))
+                holder.createRun().addPicture(
+                    ByteArrayInputStream(op.bytes),
+                    pictureTypeOf(op.bytes, op.fileName),
+                    op.fileName?.takeIf { it.isNotBlank() } ?: "image",
+                    op.widthEmu.coerceAtLeast(1),
+                    op.heightEmu.coerceAtLeast(1),
+                )
+            }
+        }
+    }
+
+    /**
+     * The body's element objects in document order, matching [XWPFDocument.getBodyElements]:
+     * paragraphs, tables and content controls. The body's trailing section properties are not
+     * a body element and are left out, so both lists line up index for index.
+     */
+    private fun bodyObjects(doc: XWPFDocument): List<XmlObject> {
+        val objects = ArrayList<XmlObject>()
+        doc.getDocument().getBody().newCursor().use { cursor ->
+            cursor.selectPath("./*")
+            while (cursor.toNextSelection()) {
+                val child = cursor.getObject()
+                if (child is CTP || child is CTTbl || child is CTSdtBlock) objects.add(child)
+            }
+        }
+        return objects
+    }
+
+    /**
+     * Inserts an empty paragraph into the body: in front of the body element after
+     * [elementIndex], in front of the trailing section properties when that element was the
+     * last one, and at the end of the body when it has neither. -1 inserts at the very top.
+     * The section properties must stay the body's last child, or Word sees a damaged document.
+     */
+    private fun insertParagraph(doc: XWPFDocument, objects: List<XmlObject>, elementIndex: Int): XWPFParagraph {
+        val body = doc.getDocument().getBody()
+        val anchor = if (elementIndex < 0) {
+            objects.firstOrNull() ?: body.getSectPr()
+        } else {
+            objects.getOrNull(elementIndex + 1) ?: body.getSectPr()
+        }
+        return if (anchor != null) doc.insertNewParagraph(anchor.newCursor()) else doc.createParagraph()
+    }
+
+    /**
+     * Copies the paragraph properties an inserted or split paragraph inherits: style,
+     * alignment, indentation and the list the paragraph is part of, so a list item stays in
+     * its list with the same numbering. A paragraph-level section break is left out of the
+     * copy — two paragraphs claiming to end a section is not a structure Word expects, and
+     * the paragraph that had the break keeps it.
+     */
+    private fun copyParagraphProperties(from: XWPFParagraph, to: XWPFParagraph) {
+        val source = from.getCTP().getPPr() ?: return
+        val copy = source.copy() as? CTPPr ?: return
+        // Unsetting an element that is not set throws in XmlBeans on a detached copy.
+        if (copy.isSetSectPr()) copy.unsetSectPr()
+        to.getCTP().setPPr(copy)
+    }
+
+    /**
+     * Moves the runs holding content the run model does not own (pictures, fields, references)
+     * from one paragraph to the end of another. A merge that deleted them would destroy content
+     * the editor never showed.
+     */
+    private fun moveUnmodelledRuns(from: XWPFParagraph, to: XWPFParagraph) {
+        val moving = from.runs.filter(::hasUnmodelledContent)
+        if (moving.isEmpty()) return
+        to.getCTP().newCursor().use { target ->
+            target.toEndToken()
+            for (run in moving) {
+                run.getCTR()?.newCursor()?.use { cursor -> cursor.moveXml(target) }
+            }
+        }
+    }
+
+    /** The paragraph's drawings as (run, index within that run) pairs, in run order. */
+    private fun drawingsOf(p: XWPFParagraph): List<Pair<XWPFRun, Int>> {
+        val drawings = ArrayList<Pair<XWPFRun, Int>>()
+        for (run in p.runs) {
+            val count = run.getCTR()?.sizeOfDrawingArray() ?: 0
+            for (index in 0 until count) drawings.add(run to index)
+        }
+        return drawings
+    }
+
+    /**
+     * Removes one body element. The last block of a document is kept: a body without any
+     * block-level content is not a document Word will open.
+     */
+    private fun removeElement(doc: XWPFDocument, elementIndex: Int) {
+        if (doc.bodyElements.size <= 1) {
+            throw IllegalStateException("The last block of a document cannot be removed")
+        }
+        if (!doc.removeBodyElement(elementIndex)) {
+            throw IllegalStateException("Block $elementIndex could not be removed")
+        }
+    }
+
+    /**
+     * The OOXML picture type of an image, taken from its file signature. The type decides the
+     * content type and the extension of the package part the bytes are stored in, so the bytes
+     * decide it, not the name the file happened to be picked under.
+     */
+    private fun pictureTypeOf(bytes: ByteArray, fileName: String?): PictureType = when {
+        bytes.hasSignature(0x89, 0x50, 0x4E, 0x47) -> PictureType.PNG
+        bytes.hasSignature(0xFF, 0xD8, 0xFF) -> PictureType.JPEG
+        bytes.hasSignature(0x47, 0x49, 0x46, 0x38) -> PictureType.GIF
+        bytes.hasSignature(0x42, 0x4D) -> PictureType.BMP
+        fileName?.endsWith(".jpg", ignoreCase = true) == true -> PictureType.JPEG
+        fileName?.endsWith(".jpeg", ignoreCase = true) == true -> PictureType.JPEG
+        fileName?.endsWith(".gif", ignoreCase = true) == true -> PictureType.GIF
+        else -> PictureType.PNG
+    }
+
+    private fun ByteArray.hasSignature(vararg signature: Int): Boolean =
+        size >= signature.size && signature.indices.all { (this[it].toInt() and 0xFF) == signature[it] }
 
     // ---- Read Helpers -------------------------------------------------------
 
@@ -277,6 +548,8 @@ object WordDocument {
             styleId = p.style,
             align = align,
             listType = listTypeOf(p, doc),
+            listLevel = listLevelOf(p),
+            maxListLevel = maxListLevelOf(p, doc),
             indentTwips = indent,
         )
         return ParagraphBlock(props, merged, editable = true)
@@ -311,13 +584,76 @@ object WordDocument {
         null
     }
 
+    /** The list levels a numbering definition actually defines, ascending; empty when unreadable. */
+    private fun definitionLevels(doc: XWPFDocument, numId: BigInteger): List<Int> = try {
+        val numbering = doc.numbering
+        val abstractNumId = numbering?.getNum(numId)?.getCTNum()?.getAbstractNumId()?.getVal()
+        numbering?.getAbstractNum(abstractNumId)?.getAbstractNum()?.getLvlList()
+            ?.mapIndexed { index, lvl -> (lvl.getIlvl() as? Number)?.toInt() ?: index }
+            ?.distinct()
+            ?.sorted()
+            ?: emptyList()
+    } catch (_: Exception) {
+        emptyList()
+    }
+
+    /** `w:ilvl` of a paragraph's numbering reference, 0 when it is absent or unreadable. */
+    private fun listLevelOf(p: XWPFParagraph): Int {
+        val value = p.getCTP().getPPr()?.getNumPr()?.getIlvl()?.getVal() as? Number ?: return 0
+        return value.toInt().coerceIn(0, MAX_LIST_LEVEL)
+    }
+
+    /** The deepest level the paragraph's own list offers, 0 when it is not in a readable list. */
+    private fun maxListLevelOf(p: XWPFParagraph, doc: XWPFDocument): Int {
+        val numId = p.numID ?: return 0
+        return definitionLevels(doc, numId).maxOrNull()?.coerceAtMost(MAX_LIST_LEVEL) ?: 0
+    }
+
+    /**
+     * Moves a list paragraph to another numbering level. The requested level is used when the
+     * paragraph's own definition has it; a definition without that level falls back to the
+     * deepest one it does have, so a paragraph can never point at a level that does not
+     * exist. A paragraph with no numbering reference is left alone: a level without a list
+     * means nothing in OOXML.
+     */
+    private fun writeListLevel(doc: XWPFDocument, p: XWPFParagraph, level: Int) {
+        val numId = p.numID ?: return
+        val available = definitionLevels(doc, numId)
+        if (available.isEmpty()) return
+        val target = when {
+            level in available -> level
+            available.any { it <= level } -> available.filter { it <= level }.max()
+            else -> available.min()
+        }
+        p.setNumILvl(BigInteger.valueOf(target.toLong().coerceIn(0, MAX_LIST_LEVEL.toLong())))
+    }
+
     /** The URL behind a hyperlink run; an internal (bookmark) link has no relationship id. */
     private fun linkUrlOf(run: XWPFRun, doc: XWPFDocument): String? =
         (run as? XWPFHyperlinkRun)?.getHyperlinkId()?.let { doc.getHyperlinkByID(it)?.getURL() }
 
     private fun readTable(t: XWPFTable): TableBlock {
         val rows = t.rows.map { row -> row.tableCells.map(::readCellText) }
-        return TableBlock(rows)
+        return TableBlock(rows, merged = hasMergedCells(t))
+    }
+
+    /**
+     * Whether any cell of the table spans columns or takes part in a vertical merge. The grid
+     * model is flat, so a structural edit of such a table would replace the merged cells with
+     * ordinary ones; the table is then edited cell by cell only.
+     */
+    private fun hasMergedCells(t: XWPFTable): Boolean = t.rows.any { row ->
+        row.tableCells.any { cell ->
+            val pr = cell.getCTTc().getTcPr()
+            val span = (pr?.getGridSpan()?.getVal() as? Number)?.toInt() ?: 1
+            span > 1 || pr?.isSetVMerge() == true
+        }
+    }
+
+    /** Whether a grid still has the same rows with the same number of cells per row as the table. */
+    private fun sameShape(table: XWPFTable, grid: List<List<String>>): Boolean {
+        if (table.rows.size != grid.size) return false
+        return table.rows.withIndex().all { (index, row) -> row.tableCells.size == grid[index].size }
     }
 
     /**
@@ -336,7 +672,9 @@ object WordDocument {
             for (pic in pics) {
                 val data = pic.pictureData?.data
                 if (data != null && data.isNotEmpty()) {
-                    list.add(ImageBlock(data, pic.pictureData?.fileName))
+                    // The ordinal counts the paragraph's drawings in run order, the same order
+                    // POI reads them in, so removing one addresses exactly the picture shown.
+                    list.add(ImageBlock(data, pic.pictureData?.fileName, ordinal = list.size))
                 }
             }
         }
@@ -562,6 +900,7 @@ object WordDocument {
     }
 
     private fun writeTable(doc: XWPFDocument, table: XWPFTable, newGrid: List<List<String>>) {
+        val columnsBefore = table.rows.firstOrNull()?.tableCells?.size ?: 0
         val targetRowCount = newGrid.size
         while (table.rows.size < targetRowCount) {
             table.createRow()
@@ -575,6 +914,7 @@ object WordDocument {
             val targetColCount = newGrid[r].size
             while (row.tableCells.size < targetColCount) {
                 row.addNewTableCell()
+                copyCellProperties(row, row.tableCells.size - 1)
             }
             // A column deleted in the editor has to leave the XML too, or the saved table
             // keeps its old width with a stale cell at the end.
@@ -589,6 +929,41 @@ object WordDocument {
                 if (readCellText(cell) == text) continue
                 writeCell(doc, cell, text)
             }
+        }
+
+        // A column inserted or deleted in the editor also changes how many columns the table's
+        // grid definition describes. Left stale, the saved table keeps the old column widths
+        // and Word lays the new column out over a grid that no longer matches its cells.
+        val columnsAfter = table.rows.firstOrNull()?.tableCells?.size ?: 0
+        if (columnsAfter != columnsBefore) syncGrid(table, columnsAfter)
+    }
+
+    /** Gives a cell added by the editor the look of its left neighbour, minus any merge. */
+    private fun copyCellProperties(row: XWPFTableRow, index: Int) {
+        if (index <= 0) return
+        val properties = row.getCell(index - 1)?.getCTTc()?.getTcPr()?.copy() as? CTTcPr ?: return
+        // A copied span would merge the new cell into the column it was meant to extend.
+        properties.unsetGridSpan()
+        properties.unsetVMerge()
+        row.getCell(index)?.getCTTc()?.setTcPr(properties)
+    }
+
+    /**
+     * Makes the table's grid definition describe [columns] columns, keeping the widths that are
+     * already defined and giving a new column the width of the last known one (or an equal
+     * share of the table's width). A table built by POI has no grid at all, so one is added.
+     */
+    private fun syncGrid(table: XWPFTable, columns: Int) {
+        if (columns <= 0) return
+        val ctTbl = table.getCTTbl()
+        val grid = ctTbl.getTblGrid() ?: ctTbl.addNewTblGrid()
+        while (grid.sizeOfGridColArray() > columns) grid.removeGridCol(grid.sizeOfGridColArray() - 1)
+        if (grid.sizeOfGridColArray() >= columns) return
+        val known = grid.getGridColList().mapNotNull { (it.getW() as? Number)?.toLong() }.filter { it > 0 }
+        val tableWidth = (ctTbl.getTblPr()?.getTblW()?.getW() as? Number)?.toLong()?.takeIf { it > 0 }
+        val width = known.lastOrNull() ?: tableWidth?.div(columns) ?: DEFAULT_COLUMN_WIDTH
+        while (grid.sizeOfGridColArray() < columns) {
+            grid.addNewGridCol().setW(BigInteger.valueOf(width.coerceAtLeast(1)))
         }
     }
 
@@ -686,4 +1061,10 @@ object WordDocument {
     }
 
     private val BULLET_MARKS = listOf("\u2022", "o", "\u25AA")
+
+    /** The deepest list level an editor action will move a paragraph to. */
+    private const val MAX_LIST_LEVEL = 8
+
+    /** The width given to a column of a table whose own widths cannot be read, in twips. */
+    private const val DEFAULT_COLUMN_WIDTH = 2400L
 }
