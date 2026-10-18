@@ -1601,6 +1601,22 @@ class WordPreservationTest {
         }
         assertEquals("the level is written as w:ilvl", 1, ilvl?.toInt())
         assertEquals("the level is real list structure, not indentation", 0, block.props.indentTwips)
+        assertEquals(
+            "no numbering definition was added or rebuilt",
+            numberingDefinitionCount(bytes),
+            numberingDefinitionCount(after),
+        )
+        // Only the paragraph that was moved: the other items, of this list and of the bullet
+        // list above it, keep the list and the level they had.
+        XWPFDocument(ByteArrayInputStream(after)).use { doc ->
+            val others = doc.paragraphs.filter { it.text in listOf("Bullet one", "Bullet two", "Numbered one") }
+            val levels = others.map { it.text to (it.numID?.toInt() to it.numIlvl?.toInt()) }
+            assertEquals(
+                "the other lists are untouched",
+                listOf("Bullet one" to (1 to 0), "Bullet two" to (1 to 1), "Numbered one" to (2 to 0)),
+                levels,
+            )
+        }
     }
 
     @Test
