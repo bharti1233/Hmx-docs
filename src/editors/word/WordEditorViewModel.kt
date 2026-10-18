@@ -1,6 +1,7 @@
 package dev.kern.editors.word
 
 import android.app.Application
+import android.graphics.BitmapFactory
 import android.net.Uri
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -9,6 +10,7 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -18,6 +20,19 @@ import dev.kern.shared.io.RecentDocuments
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+
+/** One step of the indentation/level controls and of the OOXML default, in twips (0.25 in). */
+private const val INDENT_STEP_TWIPS = 360
+
+/** Shown when a table's rows or columns are left alone because its cells are merged. */
+private const val MERGED_TABLE_NOTICE =
+    "This table has merged cells, so its rows and columns are left as they are. Its text can still be edited."
+
+/** The EMU of one device pixel of a picture at 96 dpi. */
+private const val EMU_PER_PIXEL = 9525
+
+/** The widest a picture is placed: 6.5 in, the text column of a letter page. */
+private const val MAX_IMAGE_WIDTH_EMU = 5_943_600
 
 /**
  * Word editor state with full rich-text character formatting, paragraph/list styles,
@@ -68,15 +83,27 @@ class WordEditorViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---- Undo / Redo --------------------------------------------------------
 
+    /**
+     * One step of editing history, with the document version it belongs to. A text edit shares
+     * [bytes] and [blocks] with its neighbours (the array is kept by reference, not copied);
+     * a structural change replaces them with the document it produced. Undo therefore always
+     * restores a model that matches the bytes the next save would write.
+     */
     private data class Snapshot(
         val fields: Map<Int, TextFieldValue>,
         val paraProps: Map<Int, WordDocument.ParaProps>,
         val tableStates: Map<Int, List<List<String>>>,
+        val bytes: ByteArray?,
+        val blocks: List<WordDocument.Block>,
+        val focused: Int?,
     )
 
     private val undoStack = ArrayDeque<Snapshot>()
     private val redoStack = ArrayDeque<Snapshot>()
     private val maxHistory = 30
+
+    /** How many whole document versions editing history keeps alive (one per structural change). */
+    private val maxDocumentVersions = 4
 
     var canUndo by mutableStateOf(false)
         private set
@@ -225,24 +252,7 @@ class WordEditorViewModel(app: Application) : AndroidViewModel(app) {
             result.onSuccess { (name, bytes, parsed) ->
                 fileName = name
                 originalBytes = bytes
-                blocks = parsed.blocks
-                fields.clear()
-                paraProps.clear()
-                tableStates.clear()
-                parsed.blocks.forEachIndexed { i, block ->
-                    when (block) {
-                        is WordDocument.ParagraphBlock -> {
-                            paraProps[i] = block.props
-                            if (block.editable) {
-                                fields[i] = TextFieldValue(WordRichText.toAnnotated(block.runs))
-                            }
-                        }
-                        is WordDocument.TableBlock -> {
-                            tableStates[i] = block.rows
-                        }
-                        WordDocument.OpaqueBlock, is WordDocument.ImageBlock -> Unit
-                    }
-                }
+                adopt(parsed)
                 // The document opened: it belongs in the home screen's Recent list from here on.
                 RecentDocuments.recordOpen(ctx, target, name, DocumentFormat.WORD, bytes.size.toLong())
                 loading = false
@@ -296,6 +306,43 @@ class WordEditorViewModel(app: Application) : AndroidViewModel(app) {
     fun activeParaProps(): WordDocument.ParaProps? =
         focusedIndex?.let { paraProps[it] }
 
+    /**
+     * The property changes to write for a paragraph: the difference from what it was read with.
+     * Setting a property back to the value the document already had writes nothing, and a
+     * history step is rebuilt from this same rule, so undoing a change cannot leave the write
+     * behind while the editor shows the old value.
+     */
+    private fun propOpsFor(
+        index: Int,
+        props: WordDocument.ParaProps,
+        from: List<WordDocument.Block> = blocks,
+    ): WordDocument.ParaPropsUpdate {
+        val read = (from.getOrNull(index) as? WordDocument.ParagraphBlock)?.props
+            ?: return WordDocument.ParaPropsUpdate(
+                kind = props.kind,
+                align = props.align,
+                listType = props.listType,
+                listLevel = props.listLevel,
+                indentTwips = props.indentTwips,
+            )
+        return WordDocument.ParaPropsUpdate(
+            kind = props.kind.takeIf { it != read.kind },
+            align = props.align.takeIf { it != read.align },
+            listType = props.listType.takeIf { it != read.listType },
+            // A level means nothing without the list it belongs to.
+            listLevel = props.listLevel
+                .takeIf { props.listType != WordDocument.ListType.NONE && it != read.listLevel },
+            indentTwips = props.indentTwips.takeIf { it != read.indentTwips },
+        )
+    }
+
+    /** Records a paragraph's new properties and the change that has to be written for them. */
+    private fun setParaProps(index: Int, props: WordDocument.ParaProps) {
+        paraProps[index] = props
+        paraPropOps[index] = propOpsFor(index, props)
+        dirty = true
+    }
+
     // ---- Character Formatting -----------------------------------------------
 
     fun toggleBold() {
@@ -348,20 +395,14 @@ class WordEditorViewModel(app: Application) : AndroidViewModel(app) {
         val idx = focusedIndex ?: return
         val current = paraProps[idx] ?: return
         pushSnapshot()
-        val updated = current.copy(kind = kind)
-        paraProps[idx] = updated
-        paraPropOps[idx] = (paraPropOps[idx] ?: WordDocument.ParaPropsUpdate()).copy(kind = kind)
-        dirty = true
+        setParaProps(idx, current.copy(kind = kind))
     }
 
     fun setAlignment(align: WordDocument.Align) {
         val idx = focusedIndex ?: return
         val current = paraProps[idx] ?: return
         pushSnapshot()
-        val updated = current.copy(align = align)
-        paraProps[idx] = updated
-        paraPropOps[idx] = (paraPropOps[idx] ?: WordDocument.ParaPropsUpdate()).copy(align = align)
-        dirty = true
+        setParaProps(idx, current.copy(align = align))
     }
 
     fun toggleBulletList() {
@@ -369,10 +410,8 @@ class WordEditorViewModel(app: Application) : AndroidViewModel(app) {
         val current = paraProps[idx] ?: return
         pushSnapshot()
         val target = if (current.listType == WordDocument.ListType.BULLET) WordDocument.ListType.NONE else WordDocument.ListType.BULLET
-        val updated = current.copy(listType = target)
-        paraProps[idx] = updated
-        paraPropOps[idx] = (paraPropOps[idx] ?: WordDocument.ParaPropsUpdate()).copy(listType = target)
-        dirty = true
+        // Leaving a list puts the paragraph back at its outermost level.
+        setParaProps(idx, current.copy(listType = target, listLevel = if (target == WordDocument.ListType.NONE) 0 else current.listLevel))
     }
 
     fun toggleNumberedList() {
@@ -380,32 +419,34 @@ class WordEditorViewModel(app: Application) : AndroidViewModel(app) {
         val current = paraProps[idx] ?: return
         pushSnapshot()
         val target = if (current.listType == WordDocument.ListType.NUMBER) WordDocument.ListType.NONE else WordDocument.ListType.NUMBER
-        val updated = current.copy(listType = target)
-        paraProps[idx] = updated
-        paraPropOps[idx] = (paraPropOps[idx] ?: WordDocument.ParaPropsUpdate()).copy(listType = target)
-        dirty = true
+        setParaProps(idx, current.copy(listType = target, listLevel = if (target == WordDocument.ListType.NONE) 0 else current.listLevel))
     }
 
     fun increaseIndent() {
         val idx = focusedIndex ?: return
         val current = paraProps[idx] ?: return
         pushSnapshot()
-        val newIndent = current.indentTwips + 360 // 0.25 in
-        val updated = current.copy(indentTwips = newIndent)
-        paraProps[idx] = updated
-        paraPropOps[idx] = (paraPropOps[idx] ?: WordDocument.ParaPropsUpdate()).copy(indentTwips = newIndent)
-        dirty = true
+        // A real list item moves one level deeper: the position is the list's own, not a
+        // direct indentation, so Word (and the next save) keeps the nesting. Everything else,
+        // and a list whose definition has no deeper level, moves its indentation as before.
+        val deeper = current.listType != WordDocument.ListType.NONE && current.listLevel < current.maxListLevel
+        setParaProps(
+            idx,
+            if (deeper) current.copy(listLevel = current.listLevel + 1)
+            else current.copy(indentTwips = current.indentTwips + INDENT_STEP_TWIPS),
+        )
     }
 
     fun decreaseIndent() {
         val idx = focusedIndex ?: return
         val current = paraProps[idx] ?: return
         pushSnapshot()
-        val newIndent = (current.indentTwips - 360).coerceAtLeast(0)
-        val updated = current.copy(indentTwips = newIndent)
-        paraProps[idx] = updated
-        paraPropOps[idx] = (paraPropOps[idx] ?: WordDocument.ParaPropsUpdate()).copy(indentTwips = newIndent)
-        dirty = true
+        val shallower = current.listType != WordDocument.ListType.NONE && current.listLevel > 0
+        setParaProps(
+            idx,
+            if (shallower) current.copy(listLevel = current.listLevel - 1)
+            else current.copy(indentTwips = (current.indentTwips - INDENT_STEP_TWIPS).coerceAtLeast(0)),
+        )
     }
 
     // ---- Table Operations & Dedicated Modal --------------------------------
@@ -416,6 +457,14 @@ class WordEditorViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var activeSelectedRow by mutableIntStateOf(0)
     var activeSelectedCol by mutableIntStateOf(0)
+
+    /**
+     * Whether the grid editor may change a table's rows and columns. A table with merged cells
+     * is edited cell by cell only: the grid model cannot describe a span, and rewriting the
+     * rows from it would replace the merged cells with ordinary ones.
+     */
+    fun isTableEditable(blockIndex: Int): Boolean =
+        (blocks.getOrNull(blockIndex) as? WordDocument.TableBlock)?.merged != true
 
     fun openTableEditor(blockIndex: Int) {
         val grid = tableStates[blockIndex] ?: (blocks.getOrNull(blockIndex) as? WordDocument.TableBlock)?.rows ?: return
@@ -441,7 +490,15 @@ class WordEditorViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** Whether the open table may have rows or columns changed; merged cells cannot be expressed. */
+    fun activeTableStructureEditable(): Boolean =
+        activeTableBlockIndex?.let(::isTableEditable) ?: false
+
     fun insertTableRow(atIndex: Int) {
+        if (!activeTableStructureEditable()) {
+            notice = MERGED_TABLE_NOTICE
+            return
+        }
         val colCount = activeTableData.firstOrNull()?.size ?: 2
         val newRow = List(colCount) { "" }
         val insertPos = atIndex.coerceIn(0, activeTableData.size)
@@ -452,6 +509,10 @@ class WordEditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun deleteTableRow(atIndex: Int) {
+        if (!activeTableStructureEditable()) {
+            notice = MERGED_TABLE_NOTICE
+            return
+        }
         if (activeTableData.size <= 1 || atIndex !in activeTableData.indices) return
         val list = activeTableData.toMutableList()
         list.removeAt(atIndex)
@@ -462,6 +523,10 @@ class WordEditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun insertTableColumn(atIndex: Int) {
+        if (!activeTableStructureEditable()) {
+            notice = MERGED_TABLE_NOTICE
+            return
+        }
         val insertPos = atIndex.coerceIn(0, activeTableData.firstOrNull()?.size ?: 0)
         activeTableData = activeTableData.map { row ->
             val rList = row.toMutableList()
@@ -472,6 +537,10 @@ class WordEditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun deleteTableColumn(atIndex: Int) {
+        if (!activeTableStructureEditable()) {
+            notice = MERGED_TABLE_NOTICE
+            return
+        }
         val colCount = activeTableData.firstOrNull()?.size ?: 0
         if (colCount <= 1 || atIndex !in 0 until colCount) return
         activeTableData = activeTableData.map { row ->
@@ -513,6 +582,7 @@ class WordEditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun addTableRow(blockIndex: Int) {
+        if (!isTableEditable(blockIndex)) return
         val grid = tableStates[blockIndex] ?: return
         pushSnapshot()
         val colCount = grid.firstOrNull()?.size ?: 2
@@ -524,6 +594,7 @@ class WordEditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun deleteTableRow(blockIndex: Int, row: Int) {
+        if (!isTableEditable(blockIndex)) return
         val grid = tableStates[blockIndex] ?: return
         if (grid.size <= 1 || row !in grid.indices) return
         pushSnapshot()
@@ -534,6 +605,7 @@ class WordEditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun addTableColumn(blockIndex: Int) {
+        if (!isTableEditable(blockIndex)) return
         val grid = tableStates[blockIndex] ?: return
         pushSnapshot()
         val newGrid = grid.map { row -> row + "" }
@@ -543,6 +615,7 @@ class WordEditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun deleteTableColumn(blockIndex: Int, col: Int) {
+        if (!isTableEditable(blockIndex)) return
         val grid = tableStates[blockIndex] ?: return
         if ((grid.firstOrNull()?.size ?: 0) <= 1) return
         pushSnapshot()
@@ -551,6 +624,242 @@ class WordEditorViewModel(app: Application) : AndroidViewModel(app) {
         tableEdits[blockIndex] = newGrid
         dirty = true
     }
+
+    // ---- Block Structure (paragraphs and pictures) --------------------------
+
+    /**
+     * True while a structural change is being written out and read back. The editor pauses for
+     * that moment: the change renumbers blocks, so a keystroke racing it would land in the
+     * wrong paragraph.
+     */
+    var busy by mutableStateOf(false)
+        private set
+
+    /** A one-shot message for an action that could not be carried out. */
+    var notice by mutableStateOf<String?>(null)
+
+    /** Bumped when the editor places the caret itself, so the screen can take focus for it. */
+    var focusTick by mutableIntStateOf(0)
+        private set
+
+    /** The block a structural action applies to: the paragraph under the caret. */
+    private fun focusedParagraph(): Int? =
+        focusedIndex?.takeIf { blocks.getOrNull(it) is WordDocument.ParagraphBlock }
+
+    fun canInsertParagraph(): Boolean = !busy && !loading && blocks.isNotEmpty()
+
+    fun canEditStructure(): Boolean = !busy && !loading && focusedParagraph() != null
+
+    fun canDeleteFocused(): Boolean = canEditStructure() && blocks.size > 1
+
+    fun canMergeWithPrevious(): Boolean {
+        val index = focusedParagraph() ?: return false
+        return !busy && !loading && index > 0 && blocks.getOrNull(index - 1) is WordDocument.ParagraphBlock
+    }
+
+    fun canInsertImage(): Boolean = canInsertParagraph()
+
+    /** Adds a paragraph after the caret's block, carrying the formatting of the nearest paragraph. */
+    fun insertParagraphAfterFocused() {
+        if (!canInsertParagraph()) return
+        val after = focusedIndex ?: blocks.indexOfLast { it is WordDocument.ParagraphBlock }
+        if (after < 0) return
+        runBlockOp(
+            WordDocument.BlockOp.InsertParagraph(after = after, inheritFrom = inheritanceSource(after)),
+            focusBlock = { (after + 1).coerceIn(0, it.size - 1) },
+        )
+    }
+
+    /** Enter: the text from [offset] on moves into a new paragraph that keeps this one's formatting. */
+    fun splitFocusedParagraph(offset: Int) {
+        val index = focusedParagraph() ?: return
+        if (busy || loading) return
+        val length = fields[index]?.text?.length ?: return
+        runBlockOp(
+            WordDocument.BlockOp.SplitParagraph(index, offset.coerceIn(0, length)),
+            focusBlock = { (index + 1).coerceIn(0, it.size - 1) },
+        )
+    }
+
+    /** Removes the paragraph under the caret; the last block of a document is kept. */
+    fun deleteFocusedBlock() {
+        if (!canDeleteFocused()) return
+        val index = focusedParagraph() ?: return
+        runBlockOp(
+            WordDocument.BlockOp.DeleteBlock(index),
+            focusBlock = { minOf(index, it.size - 1) },
+        )
+    }
+
+    /** Joins the paragraph under the caret to the one before it, as deleting a paragraph mark does. */
+    fun mergeFocusedWithPrevious() {
+        if (!canMergeWithPrevious()) return
+        val index = focusedParagraph() ?: return
+        val caret = fields[index - 1]?.text?.length ?: 0
+        runBlockOp(
+            WordDocument.BlockOp.MergeWithPrevious(index),
+            focusBlock = { index - 1 },
+            caret = caret,
+        )
+    }
+
+    /** Removes one picture; the text around it and every other picture stay where they are. */
+    fun deleteImage(blockIndex: Int, ordinal: Int) {
+        if (busy || loading || saving) return
+        if (blocks.getOrNull(blockIndex) !is WordDocument.ImageBlock) return
+        runBlockOp(
+            WordDocument.BlockOp.DeleteImage(blockIndex, ordinal),
+            focusBlock = { new ->
+                val before = focusedIndex
+                val moved = when {
+                    before == null -> null
+                    before > blockIndex -> before - 1
+                    else -> before
+                }
+                moved?.takeIf { new.getOrNull(it) is WordDocument.ParagraphBlock }
+            },
+            caret = null,
+        )
+    }
+
+    /** Places a picture picked from the device after the caret's block. */
+    fun insertImage(source: Uri) {
+        if (!canInsertImage()) return
+        val ctx = getApplication<Application>()
+        val after = focusedIndex ?: blocks.indexOfLast { it is WordDocument.ParagraphBlock }
+        // The snapshot is taken here, before the reading starts, because the operation itself
+        // runs with busy already set (there is no way to un-read a file once picked).
+        pushSnapshot()
+        busy = true
+        viewModelScope.launch {
+            val prepared = withContext(Dispatchers.IO) {
+                runCatching {
+                    val bytes = DocumentIo.readBytes(ctx, source)
+                    // Bounds only: the picture is stored as it is, never re-encoded.
+                    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                    BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+                    PreparedPicture(bytes, DocumentIo.displayName(ctx, source), bounds.outWidth, bounds.outHeight)
+                }
+            }
+            prepared.onSuccess { picture ->
+                if (picture.bytes.isEmpty() || picture.widthPx <= 0 || picture.heightPx <= 0) {
+                    busy = false
+                    notice = "That file is not a picture this editor can place."
+                    return@onSuccess
+                }
+                // Scaled down to the text column when it is wider, in proportion.
+                val scale = (MAX_IMAGE_WIDTH_EMU.toDouble() / (picture.widthPx * EMU_PER_PIXEL)).coerceAtMost(1.0)
+                runBlockOp(
+                    WordDocument.BlockOp.InsertImage(
+                        after = after,
+                        bytes = picture.bytes,
+                        fileName = picture.name,
+                        widthEmu = (picture.widthPx * EMU_PER_PIXEL * scale).toInt().coerceAtLeast(1),
+                        heightEmu = (picture.heightPx * EMU_PER_PIXEL * scale).toInt().coerceAtLeast(1),
+                    ),
+                    focusBlock = { (after + 1).coerceIn(0, it.size - 1) },
+                    alreadyBusy = true,
+                )
+            }.onFailure { failure ->
+                busy = false
+                notice = failure.message ?: "The picture could not be read."
+            }
+        }
+    }
+
+    /** The nearest paragraph a new block can take its formatting from. */
+    private fun inheritanceSource(after: Int): Int {
+        for (index in after downTo 0) {
+            if (blocks.getOrNull(index) is WordDocument.ParagraphBlock) return index
+        }
+        for (index in after + 1 until blocks.size) {
+            if (blocks.getOrNull(index) is WordDocument.ParagraphBlock) return index
+        }
+        return -1
+    }
+
+    /**
+     * Carries out one block-level change: the pending edits and the change are written with the
+     * document, and the result is read back as the new model. A block index therefore never has
+     * to survive a structural change, and a change can never be applied twice.
+     */
+    private fun runBlockOp(
+        op: WordDocument.BlockOp,
+        focusBlock: (List<WordDocument.Block>) -> Int?,
+        caret: Int? = 0,
+        alreadyBusy: Boolean = false,
+    ) {
+        if ((!alreadyBusy && busy) || loading || saving) return
+        val bytes = originalBytes ?: return
+        val input = snapshotForSave()
+        if (!alreadyBusy) pushSnapshot()
+        busy = true
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    val serialized = WordDocument.applyEditsAndSerialize(
+                        originalBytes = bytes,
+                        edits = input.edits,
+                        paraProps = input.paraProps,
+                        tableEdits = input.tables,
+                        blockOp = op,
+                    )
+                    serialized to WordDocument.read(serialized)
+                }
+            }
+            result.onSuccess { (serialized, parsed) ->
+                originalBytes = serialized
+                adopt(parsed)
+                // The edits that were folded into the change must not be written a second time.
+                edits.clear()
+                paraPropOps.clear()
+                tableEdits.clear()
+                busy = false
+                dirty = true
+                val target = focusBlock(parsed.blocks)
+                focusedIndex = target
+                if (target != null && caret != null) {
+                    fields[target]?.let { field -> fields[target] = field.copy(selection = TextRange(caret)) }
+                }
+                focusTick++
+            }.onFailure { failure ->
+                // Nothing was changed: the edits are still pending, so the document on disk and
+                // the editor still agree apart from them.
+                busy = false
+                notice = failure.message ?: "The change could not be applied."
+            }
+        }
+    }
+
+    /** Takes on a freshly read document: blocks, paragraph fields and table grids. */
+    private fun adopt(parsed: WordDocument.Parsed) {
+        blocks = parsed.blocks
+        fields.clear()
+        paraProps.clear()
+        tableStates.clear()
+        parsed.blocks.forEachIndexed { i, block ->
+            when (block) {
+                is WordDocument.ParagraphBlock -> {
+                    paraProps[i] = block.props
+                    if (block.editable) {
+                        fields[i] = TextFieldValue(WordRichText.toAnnotated(block.runs))
+                    }
+                }
+                is WordDocument.TableBlock -> {
+                    tableStates[i] = block.rows
+                }
+                WordDocument.OpaqueBlock, is WordDocument.ImageBlock -> Unit
+            }
+        }
+    }
+
+    /** One picture on its way into the document. */
+    private data class PreparedPicture(
+        val bytes: ByteArray,
+        val name: String,
+        val widthPx: Int,
+        val heightPx: Int,
+    )
 
     // ---- Find & Replace Actions ---------------------------------------------
 
@@ -666,52 +975,59 @@ class WordEditorViewModel(app: Application) : AndroidViewModel(app) {
     // ---- History Management -------------------------------------------------
 
     private fun pushSnapshot() {
-        val snap = Snapshot(
-            fields = fields.toMap(),
-            paraProps = paraProps.toMap(),
-            tableStates = tableStates.toMap(),
-        )
-        undoStack.addLast(snap)
+        undoStack.addLast(snapshot())
         if (undoStack.size > maxHistory) undoStack.removeFirst()
+        // ponytail: one document version per structural change, four versions kept; a longer
+        // undo chain over structural edits would hold that many copies of the file in memory.
+        while (undoStack.size > 1 && undoStack.map { it.bytes }.distinct().size > maxDocumentVersions) {
+            undoStack.removeFirst()
+        }
         redoStack.clear()
         updateHistoryState()
     }
 
+    private fun snapshot() = Snapshot(
+        fields = fields.toMap(),
+        paraProps = paraProps.toMap(),
+        tableStates = tableStates.toMap(),
+        bytes = originalBytes,
+        blocks = blocks,
+        focused = focusedIndex,
+    )
+
     fun undo() {
         if (undoStack.isEmpty()) return
-        val currentSnap = Snapshot(
-            fields = fields.toMap(),
-            paraProps = paraProps.toMap(),
-            tableStates = tableStates.toMap(),
-        )
-        redoStack.addLast(currentSnap)
-        val target = undoStack.removeLast()
-        applySnapshot(target)
+        redoStack.addLast(snapshot())
+        applySnapshot(undoStack.removeLast())
         updateHistoryState()
     }
 
     fun redo() {
         if (redoStack.isEmpty()) return
-        val currentSnap = Snapshot(
-            fields = fields.toMap(),
-            paraProps = paraProps.toMap(),
-            tableStates = tableStates.toMap(),
-        )
-        undoStack.addLast(currentSnap)
-        val target = redoStack.removeLast()
-        applySnapshot(target)
+        undoStack.addLast(snapshot())
+        applySnapshot(redoStack.removeLast())
         updateHistoryState()
     }
 
     private fun applySnapshot(snap: Snapshot) {
+        originalBytes = snap.bytes
+        blocks = snap.blocks
         fields.clear()
         fields.putAll(snap.fields)
         paraProps.clear()
         paraProps.putAll(snap.paraProps)
         tableStates.clear()
         tableStates.putAll(snap.tableStates)
+        // The pending writes are rebuilt from the restored state, not left over from the
+        // change that was undone, or the next save would write the undone change back.
+        edits.clear()
         snap.fields.forEach { (i, v) -> edits[i] = WordRichText.toRuns(v.annotatedString) }
+        paraPropOps.clear()
+        snap.paraProps.forEach { (i, props) -> paraPropOps[i] = propOpsFor(i, props, snap.blocks) }
+        tableEdits.clear()
         snap.tableStates.forEach { (i, grid) -> tableEdits[i] = grid }
+        focusedIndex = snap.focused?.takeIf { snap.blocks.getOrNull(it) is WordDocument.ParagraphBlock }
+        focusTick++
         dirty = true
     }
 

@@ -1,6 +1,8 @@
 package dev.kern.editors.word
 
 import android.graphics.BitmapFactory
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -20,7 +22,10 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
@@ -28,19 +33,26 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.TextUnit
@@ -61,7 +73,11 @@ import dev.kern.shared.ui.ToolbarButton
 import dev.kern.shared.ui.ToolbarSeparator
 import dev.kern.shared.ui.pinchZoom
 import dev.kern.shared.ui.rememberZoomState
+import kotlinx.coroutines.delay
 import kotlin.math.roundToInt
+
+/** The list level step the editor draws, in density pixels: the 0.25 in OOXML indents a level by. */
+private const val INDENT_STEP_DIP = 18
 
 private const val DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
@@ -78,11 +94,15 @@ fun WordEditorScreen(
     var showSize by remember { mutableStateOf(false) }
     var showStyles by remember { mutableStateOf(false) }
     var showAlign by remember { mutableStateOf(false) }
+    // A picture is picked from the device and placed where the caret is.
+    val pickPicture = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) vm.insertImage(uri)
+    }
 
     EditorChrome(
         title = vm.fileName.ifBlank { "Document" },
         dirty = vm.dirty,
-        saving = vm.saving,
+        saving = vm.saving || vm.busy,
         loading = vm.loading,
         error = vm.error,
         onRetry = if (vm.canRetry) vm::retry else null,
@@ -98,12 +118,16 @@ fun WordEditorScreen(
                 onSize = { showSize = true },
                 onStyles = { showStyles = true },
                 onAlign = { showAlign = true },
+                onInsertPicture = { pickPicture.launch(arrayOf("image/*")) },
             )
         },
     ) { modifier ->
         Column(modifier.fillMaxSize()) {
             if (vm.isFindOpen) {
                 FindReplaceBar(vm)
+            }
+            vm.notice?.let { message ->
+                EditorNotice(message = message, onDismiss = { vm.notice = null })
             }
             WordPage(vm, hue, Modifier.weight(1f))
         }
@@ -159,6 +183,7 @@ private fun WordToolbar(
     onSize: () -> Unit,
     onStyles: () -> Unit,
     onAlign: () -> Unit,
+    onInsertPicture: () -> Unit,
 ) {
     val style = vm.activeStyle()
     val props = vm.activeParaProps()
@@ -190,7 +215,43 @@ private fun WordToolbar(
         ToolbarButton(KernIcons.IndentIncrease, "Increase indent", onClick = vm::increaseIndent, enabled = enabled)
         ToolbarButton(KernIcons.IndentDecrease, "Decrease indent", onClick = vm::decreaseIndent, enabled = enabled)
         ToolbarSeparator()
+        ToolbarButton(KernIcons.Plus, "New paragraph", onClick = vm::insertParagraphAfterFocused, enabled = vm.canInsertParagraph())
+        ToolbarButton(KernIcons.Merge, "Merge with previous paragraph", onClick = vm::mergeFocusedWithPrevious, enabled = vm.canMergeWithPrevious())
+        ToolbarButton(KernIcons.Trash, "Delete paragraph", onClick = vm::deleteFocusedBlock, enabled = vm.canDeleteFocused())
+        ToolbarButton(KernIcons.Image, "Insert picture", onClick = onInsertPicture, enabled = vm.canInsertImage())
+        ToolbarSeparator()
         ToolbarButton(KernIcons.FindReplace, "Find and replace", onClick = vm::toggleFind, active = vm.isFindOpen)
+    }
+}
+
+/**
+ * A short-lived message about an action that was not carried out (a change the document's
+ * structure does not allow, or a picture that could not be read). It goes away on its own.
+ */
+@Composable
+private fun EditorNotice(message: String, onDismiss: () -> Unit) {
+    val colors = KernTheme.colors
+    LaunchedEffect(message) {
+        delay(6000)
+        onDismiss()
+    }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 18.dp, vertical = 8.dp)
+            .clip(RoundedCornerShape(KernRadius.innerSmall))
+            .background(colors.sunken)
+            .border(1.dp, colors.borderSoft, RoundedCornerShape(KernRadius.innerSmall))
+            .padding(start = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = message,
+            style = KernType.caption,
+            color = colors.textMid,
+            modifier = Modifier.weight(1f).padding(vertical = 8.dp),
+        )
+        KernIconButton(KernIcons.Close, "Dismiss", onClick = onDismiss, iconSize = 18.dp)
     }
 }
 
@@ -266,8 +327,27 @@ private fun FindReplaceBar(vm: WordEditorViewModel) {
 private fun WordPage(vm: WordEditorViewModel, hue: Color, modifier: Modifier) {
     val colors = KernTheme.colors
     val zoom = rememberZoomState()
+    val listState = rememberLazyListState()
+    val requesters = remember { mutableStateMapOf<Int, FocusRequester>() }
+    var handledTick by remember { mutableIntStateOf(vm.focusTick) }
+    // After a structural change the editor places the caret itself (in the paragraph an Enter
+    // press produced, or at the join after a merge): scroll that block into view and focus it,
+    // so typing carries on where the change left off instead of the keyboard closing.
+    LaunchedEffect(vm.focusTick) {
+        if (vm.focusTick == handledTick) return@LaunchedEffect
+        handledTick = vm.focusTick
+        val target = vm.focusedIndex ?: return@LaunchedEffect
+        listState.animateScrollToItem((target + 1).coerceAtMost(vm.blocks.size))
+        var frames = 0
+        while (requesters[target] == null && frames < 3) {
+            withFrameNanos { }
+            frames++
+        }
+        requesters[target]?.requestFocus()
+    }
     Box(modifier.background(colors.sunken).pinchZoom(zoom)) {
         LazyColumn(
+            state = listState,
             modifier = Modifier
                 .fillMaxSize()
                 .padding(horizontal = 18.dp, vertical = 16.dp),
@@ -290,6 +370,8 @@ private fun WordPage(vm: WordEditorViewModel, hue: Color, modifier: Modifier) {
                 items = vm.blocks,
                 key = { index, _ -> "block_$index" },
             ) { index, block ->
+                val requester = remember { FocusRequester() }
+                SideEffect { requesters[index] = requester }
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -305,8 +387,13 @@ private fun WordPage(vm: WordEditorViewModel, hue: Color, modifier: Modifier) {
                                 isFindOpen = vm.isFindOpen,
                                 searchQuery = vm.searchQuery,
                                 scale = zoom.scale,
+                                // While a structural change is being written out, the block
+                                // numbering is about to change: the fields pause with it.
+                                readOnly = vm.busy,
+                                focusRequester = requester,
                                 onChange = { vm.onValueChange(index, it) },
                                 onFocus = { vm.setFocus(index) },
+                                onEnter = { offset -> vm.splitFocusedParagraph(offset) },
                             )
                         }
                         is WordDocument.TableBlock -> {
@@ -314,12 +401,17 @@ private fun WordPage(vm: WordEditorViewModel, hue: Color, modifier: Modifier) {
                             TablePreviewCard(
                                 blockIndex = index,
                                 rows = currentRows,
+                                merged = block.merged,
                                 scale = zoom.scale,
                                 onEditTable = { vm.openTableEditor(index) },
                             )
                         }
                         is WordDocument.ImageBlock -> {
-                            ImageView(block, zoom.scale)
+                            ImageView(
+                                block = block,
+                                scale = zoom.scale,
+                                onDelete = if (vm.busy) null else { { vm.deleteImage(index, block.ordinal) } },
+                            )
                         }
                         WordDocument.OpaqueBlock -> Unit
                     }
@@ -387,12 +479,18 @@ private fun EditableParagraph(
     isFindOpen: Boolean,
     searchQuery: String,
     scale: Float,
+    readOnly: Boolean,
+    focusRequester: FocusRequester,
     onChange: (TextFieldValue) -> Unit,
     onFocus: () -> Unit,
+    onEnter: (Int) -> Unit,
 ) {
     val colors = KernTheme.colors
     val m = metricsFor(props.kind)
-    val indentPadding = (props.indentTwips / 20).dp.coerceAtMost(120.dp) * scale
+    // A listed paragraph is also drawn at the position its level has in Word (the definition's
+    // own indentation), so a level change is visible before the file is saved.
+    val listIndent = if (props.listType == WordDocument.ListType.NONE) 0.dp else (props.listLevel * (INDENT_STEP_DIP)).dp
+    val indentPadding = ((props.indentTwips / 20).dp.coerceAtMost(120.dp) + listIndent) * scale
 
     val displayValue = if (isFindOpen && searchQuery.isNotEmpty()) {
         val highlighted = WordRichText.highlightMatches(
@@ -423,6 +521,11 @@ private fun EditableParagraph(
         BasicTextField(
             value = displayValue,
             onValueChange = onChange,
+            readOnly = readOnly,
+            // Enter starts a new paragraph, as it does in Word: the paragraph is split at the
+            // caret and the text after it moves down.
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
+            keyboardActions = KeyboardActions(onNext = { onEnter(value.selection.end) }),
             textStyle = TextStyle(
                 fontFamily = OutfitFamily,
                 fontSize = m.size * scale,
@@ -434,6 +537,7 @@ private fun EditableParagraph(
             cursorBrush = SolidColor(colors.accent),
             modifier = Modifier
                 .weight(1f)
+                .focusRequester(focusRequester)
                 .onFocusChanged { if (it.isFocused) onFocus() },
         )
     }
@@ -443,6 +547,7 @@ private fun EditableParagraph(
 private fun TablePreviewCard(
     blockIndex: Int,
     rows: List<List<String>>,
+    merged: Boolean,
     scale: Float,
     onEditTable: () -> Unit,
 ) {
@@ -462,9 +567,13 @@ private fun TablePreviewCard(
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
             Text(
-                "Table · ${rows.size} rows × ${rows.firstOrNull()?.size ?: 0} cols",
+                if (merged) {
+                    "Table · ${rows.size} rows × ${rows.firstOrNull()?.size ?: 0} cols · merged cells"
+                } else {
+                    "Table · ${rows.size} rows × ${rows.firstOrNull()?.size ?: 0} cols"
+                },
                 style = KernType.meta,
-                color = colors.textMid,
+                color = if (merged) colors.textDim else colors.textMid,
             )
             ToolbarButton(
                 icon = KernIcons.Table,
@@ -587,16 +696,19 @@ private fun TableEditorSheet(
                     .padding(horizontal = 16.dp, vertical = 4.dp),
             ) {
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    ToolbarButton(KernIcons.Plus, "Add Row Above", onClick = { vm.insertTableRow(selectedRow) }, label = "+Row Above")
-                    ToolbarButton(KernIcons.Plus, "Add Row Below", onClick = { vm.insertTableRow(selectedRow + 1) }, label = "+Row Below")
+                    // A table with merged cells keeps its row and column structure: a flat
+                    // grid cannot put a span back, so those controls are switched off for it.
+                    val structureEditable = vm.activeTableStructureEditable()
+                    ToolbarButton(KernIcons.Plus, "Add Row Above", onClick = { vm.insertTableRow(selectedRow) }, label = "+Row Above", enabled = structureEditable)
+                    ToolbarButton(KernIcons.Plus, "Add Row Below", onClick = { vm.insertTableRow(selectedRow + 1) }, label = "+Row Below", enabled = structureEditable)
                     if (grid.size > 1) {
-                        ToolbarButton(KernIcons.Trash, "Delete Row", onClick = { vm.deleteTableRow(selectedRow) }, label = "-Row")
+                        ToolbarButton(KernIcons.Trash, "Delete Row", onClick = { vm.deleteTableRow(selectedRow) }, label = "-Row", enabled = structureEditable)
                     }
                     ToolbarSeparator()
-                    ToolbarButton(KernIcons.Plus, "Add Col Left", onClick = { vm.insertTableColumn(selectedCol) }, label = "+Col Left")
-                    ToolbarButton(KernIcons.Plus, "Add Col Right", onClick = { vm.insertTableColumn(selectedCol + 1) }, label = "+Col Right")
+                    ToolbarButton(KernIcons.Plus, "Add Col Left", onClick = { vm.insertTableColumn(selectedCol) }, label = "+Col Left", enabled = structureEditable)
+                    ToolbarButton(KernIcons.Plus, "Add Col Right", onClick = { vm.insertTableColumn(selectedCol + 1) }, label = "+Col Right", enabled = structureEditable)
                     if ((grid.firstOrNull()?.size ?: 0) > 1) {
-                        ToolbarButton(KernIcons.Trash, "Delete Col", onClick = { vm.deleteTableColumn(selectedCol) }, label = "-Col")
+                        ToolbarButton(KernIcons.Trash, "Delete Col", onClick = { vm.deleteTableColumn(selectedCol) }, label = "-Col", enabled = structureEditable)
                     }
                 }
             }
@@ -671,7 +783,7 @@ private fun TableEditorSheet(
 }
 
 @Composable
-private fun ImageView(block: WordDocument.ImageBlock, scale: Float) {
+private fun ImageView(block: WordDocument.ImageBlock, scale: Float, onDelete: (() -> Unit)?) {
     val bitmap = remember(block.bytes) {
         try {
             BitmapFactory.decodeByteArray(block.bytes, 0, block.bytes.size)?.asImageBitmap()
@@ -679,20 +791,31 @@ private fun ImageView(block: WordDocument.ImageBlock, scale: Float) {
             null
         }
     }
-    if (bitmap != null) {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(vertical = 8.dp),
-            contentAlignment = Alignment.Center,
-        ) {
-            Image(
-                bitmap = bitmap,
-                contentDescription = block.fileName ?: "Embedded Image",
-                modifier = Modifier
-                    .clip(RoundedCornerShape(KernRadius.innerSmall))
-                    .heightIn(max = (260 * scale).dp),
-            )
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 8.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            if (bitmap != null) {
+                Image(
+                    bitmap = bitmap,
+                    contentDescription = block.fileName ?: "Embedded Image",
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(KernRadius.innerSmall))
+                        .heightIn(max = (260 * scale).dp),
+                )
+            } else {
+                Text(
+                    text = block.fileName ?: "Picture",
+                    style = KernType.caption,
+                    color = KernTheme.colors.textDim,
+                )
+            }
+            if (onDelete != null) {
+                KernIconButton(KernIcons.Trash, "Remove picture", onClick = onDelete, iconSize = 18.dp)
+            }
         }
     }
 }

@@ -129,6 +129,42 @@ retained" means the content is not modelled by the editor but is not rewritten e
 11. **Tracked deletions** (`WordDocument.kt`): runs inside `w:del`/`w:moveFrom` are
     excluded from the editable text, kept in place, and left untouched by a rewrite.
 
+### Phase 5: structured text operations
+
+12. **Block operations** (`WordDocument.kt`, `WordEditorViewModel.kt`,
+    `WordEditorScreen.kt`): split at the caret, insert a paragraph with inherited
+    formatting, merge with the previous paragraph and delete a paragraph are applied to
+    the document itself (`applyEditsAndSerialize(..., blockOp = ...)`) and the result is
+    read back as the new model, so nothing has to keep a block index across a change.
+    Enter starts a new paragraph; the toolbar carries the other three actions plus a
+    picture. The paragraph's `w:pPr` is copied wholesale minus `w:sectPr`, and the
+    body's trailing `w:sectPr` stays last `[poi verified: insertNewParagraph(anchor
+    cursor) inserts before the anchor; unsetting an absent sectPr on a detached copy
+    throws, so the copy checks first]`.
+13. **Lists across a split** (`WordDocument.kt`): both halves keep the paragraph's
+    `numId`/`ilvl`, so the text after the caret continues the same list item sequence
+    and no numbering definition is invented. `[harness verified]`
+14. **Real list levels** (`WordDocument.kt`): indent/outdent move an item through the
+    `w:ilvl` values its own definition offers (falling back to the deepest one below,
+    and to paragraph indentation outside a list); `ParaProps.maxListLevel` keeps the UI
+    inside that depth. The items of one list keep sharing a single definition.
+    `[harness verified]`
+15. **`w:tblGrid` kept in step with the cells** (`WordDocument.kt`): a column is added or
+    removed only together with its grid entry, and a new column takes its neighbour's
+    cell properties with `gridSpan`/`vMerge` removed. A table with merged cells keeps its
+    row and column structure: the shape check refuses such a change in the model, and the
+    editor disables the controls (its cell text is still editable). `[harness verified]`
+16. **Pictures** (`WordDocument.kt`, `WordEditorViewModel.kt`): a picture picked on the
+    device is sniffed by magic bytes, stored as it is (never re-encoded) in a paragraph of
+    its own at the caret, and scaled down to the 6.5 in text column when wider; a picture
+    can be removed by its ordinal inside the paragraph; a file that is not a picture this
+    editor can place is refused with a message.
+17. **Undo/redo over structural changes** (`WordEditorViewModel.kt`): a history snapshot
+    carries the document bytes, the blocks, the paragraph fields, the properties and the
+    table grids it belongs to, and `undo`/`redo` rebuild the pending writes from the
+    restored state, so an undone change cannot be written back by the next save.
+    `[vm tested]`
+
 ## 4. Regression suite
 
 Generated fixtures keep binaries out of git (the repository's existing pattern);
@@ -209,11 +245,26 @@ environment `[inference]`.
   are preserved, but the UI offers a single level per list type.
 - Tables are edited as a grid of strings: editing a cell collapses that cell's per-run
   formatting to the look of its first run, a partly-linked cell loses its link when it is
-  edited, and there are no merge operations in the UI. Merged cells (`gridSpan`/`vMerge`)
-  in a table whose cell counts do not change survive untouched; adding or removing a
-  column changes the row's cells without rewriting `tblGrid`, so a merged table can keep
-  spans that describe the old shape (Word usually reflows it). Advanced table layout is
-  deliberately out of scope.
+  edited, and there are no merge operations in the UI (a merged cell cannot be created or
+  split here). Merged cells (`gridSpan`/`vMerge`) survive untouched, and because a flat
+  grid cannot describe a span, a table that has them refuses row and column changes
+  (model and UI both) while its cell text stays editable. `w:tblGrid` now follows the
+  cells when a column is added or removed; the added column copies its neighbour's width.
+  Advanced table layout is deliberately out of scope.
+- Enter now starts a new paragraph (Phase 5). There is no soft line break (`Shift+Enter`)
+  or line-break action in the editor, and the IME's action key is "Next", so a keyboard
+  that only offers that key still produces paragraphs.
+- Removing a picture leaves its image part and relationship in the package. The document
+  is valid and Word ignores the part; it is not garbage-collected on save.
+- A paragraph that carried a paragraph-level section break keeps it on the first half
+  after a split: the break is never duplicated, but the text that moved down belongs to
+  the following section. Moving the break to the second half, and editing page setup in
+  general, is not offered.
+- Only PNG, JPEG, GIF and BMP can be inserted (sniffed from the bytes). WebP and HEIC are
+  refused with a message rather than converted, and a picture is never re-encoded.
+- The file's bytes, not only the edits, are part of the history: up to four whole-document
+  versions are kept in memory per open document (a fifth structural change drops the
+  oldest). Text edits share their version, so ordinary typing does not multiply memory.
 - A malformed numbering reference (a `numId` whose abstract definition is missing) no
   longer throws on open or save: it reads as a numbered item and its reference is left as
   it is. Other POI failures still surface through the editor's load-error message; the
@@ -508,11 +559,48 @@ files for the round-trip cases.
     *Expected:* the tracked deletion and insertion are still there with their authors
     (Word still shows the deletion hidden), the plain-text content control is still there,
     and only the edited paragraph changed.
+33. **Enter starts a paragraph.** Put the caret in the middle of a paragraph and press
+    Enter. *Expected:* the text after the caret moves down into a paragraph of its own
+    carrying the same style (and list level, if it was a list item), the keyboard stays
+    open with the caret at the start of the new paragraph, and after saving Word shows two
+    paragraphs.
+34. **Paragraph toolbar.** With the caret in a middle paragraph, use "New paragraph",
+    "Merge with previous paragraph" and "Delete paragraph" one after another, then undo
+    each with the toolbar's undo. *Expected:* each action changes exactly that paragraph in
+    the file after saving, the caret lands where typing should continue, and undo restores
+    the text, the list and the alignment.
+35. **Undo across a structural change.** Type a word, tap Bold, press Enter, then undo
+    twice and save. *Expected:* the saved file is the document as it was before the edits —
+    no leftover bold, no extra paragraph. (Before this fix a pending formatting write
+    survived the undo and was saved.)
+36. **List levels.** In a numbered list, use indent, then outdent, save and reopen in Word.
+    *Expected:* the item moves through real list levels (`1.` → `a.` → `1.`), the numbering
+    of the other list items is unchanged, and the list does not restart.
+37. **Table column, grid and spans.** In a plain table, add a column and delete another,
+    save, reopen in Word. *Expected:* the table renders with the same number of columns as
+    cells in every row, the new column's width matches the one it was added beside, and the
+    other cells (including multi-paragraph and picture cells) are unchanged. Then open a
+    file with a merged cell: the row/column buttons are disabled, the header says "merged
+    cells", and editing cell text still saves with the span intact.
+38. **A picture in and out.** Put the caret in a paragraph, tap the picture button, pick a
+    PNG or JPEG from the device, save and reopen in Word. *Expected:* the picture appears
+    after that paragraph, keeps its proportions, is not converted, and the surrounding
+    text is unchanged. Remove it again with the small bin under it and save: *Expected:*
+    the picture is gone from the document, the rest of the paragraph and the other pictures
+    stay. Pick a WebP or HEIC: *Expected:* a message that it cannot be placed, nothing
+    added.
+39. **Undo of a picture.** Insert a picture, then undo, then save. *Expected:* the file
+    does not contain the picture and the Recent list still opens it.
+40. **Split inside a section.** In a document with more than one section, press Enter in a
+    paragraph that ends a section, save, reopen in Word. *Expected:* there is still one
+    section break (not two) and the document still opens with the same page setup.
 
 Steps 4, 5 and 12 are the ones Phase 2's changes were meant to alter; steps 15–18 cover the
 access-recovery follow-up; steps 19–23 cover the Phase 3 save-safety changes; steps 24–25
 cover the rich-text editing fix (the editor, not the text field, owns formatting); steps 26–32
 cover the Phase 4 document-model fixes (lists, run order, table cells, tracked changes); steps
+33–40 cover the Phase 5 structured editing (Enter, paragraph actions, undo over them, list
+levels, table grid and spans, pictures, sections); steps
 6–11 are the ones the preservation suite predicts and a device must confirm. A device is the
 only place any of them can be settled.
 
