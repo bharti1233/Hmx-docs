@@ -346,6 +346,46 @@ environment `[inference]`.
     - The first push of this change (`333fb69`) had a test-side literal type error in the new
       zip helper (`byteArrayOf(0x50, …)` needs `.toByte()`); its runs were cancelled when the
       follow-up push arrived, and `189729e1` carries the fix. No product-code change.
+  - Field/formatting ownership (the rich-text fix) for
+    `8a37c5327225dcad913600323129b7bc8eba6c73` — **observed**, all green:
+    [Android CI 39059503862](https://github.com/bharti1233/Hmx-docs/actions/runs/39059503862)
+    and [Release build check 39059503859](https://github.com/bharti1233/Hmx-docs/actions/runs/39059503859):
+    - unit tests **118 tests, 0 failed, 0 errors, 1 skipped** in 12 suites (89 → 118: the
+      rich-text pipeline driven against a real Compose text field, the field tests, and the
+      stacked-toolbar-toggle test; the skipped test is still the pre-existing `@Ignore` probe).
+    - lint **0 errors, 49 warnings** — unchanged.
+    - `Kern-release-unsigned.apk` sha256
+      `728188b2ef4e2ac3f8140096fddc2387f34d43b6f6264be81e5b22fbf7f44ba6` (7,149,520 bytes);
+      the unsigned-verification and R8 steps succeeded and the R8 reports were produced.
+  - Phase 4 document-model fidelity for `f668553bd2804d0b89158db22fd293f2b412a5b8` —
+    **observed**, all green:
+    [Android CI 39117613412](https://github.com/bharti1233/Hmx-docs/actions/runs/39117613412)
+    (Build debug APK, Unit tests and Android Lint all succeeded) and
+    [Release build check 39117613379](https://github.com/bharti1233/Hmx-docs/actions/runs/39117613379):
+    - unit tests **140 tests, 0 failed, 0 errors, 1 skipped** in 12 suites (118 → 140: 22 new
+      tests in `WordPreservationTest` covering list definitions and levels, run order around
+      pictures/fields/links, table cells (lines, formatting, inline content, whole-cell and
+      partial links), section properties, and tracked changes / content controls).
+    - lint **0 errors, 49 warnings** — unchanged.
+    - `Kern-debug.apk` sha256
+      `9b9183e069b096d62addca90c18448584ef4ff23c8d9c05757dcb857114546e0` (35,436,259 bytes).
+    - `Kern-release-unsigned.apk` sha256
+      `f9be6162036e8a7a873e786c2a1db421f097954db6f56b1011e0176076e13fec` (7,149,520 bytes);
+      "Build release APK (unsigned)", "Verify R8 actually ran" and "Verify the release APK is
+      unsigned" all succeeded, and the R8 reports (mapping, usage, configuration, seeds) were
+      produced.
+    - Three pushes were needed, all recorded here: `e580fe3` did not compile (two
+      union-valued schema attributes were read with `longValue()`, and XmlBeans types those
+      `Object`; Android CI 39109603391 and Release check 39109603411 both failed on it);
+      `93952ad` reads them as numbers — release check passed, Android CI 39110071469 failed in
+      the *test* source set instead (an `if`/`else` mixing a `String` with a `ByteArray` in a
+      fixture helper); `7702b50` compiled and ran the whole suite, where 6 of the 22 new tests
+      failed on test-side expectations only (POI's `addPicture` ignores the file name it is
+      given and names the picture data `image1.png`; `blockIndex` matches a paragraph's text
+      exactly, and the injected fixture's first paragraph read `SubjectInserted subject`; and
+      the picture-anchor case asserted the wrong split when the insertion starts exactly at the
+      picture's offset). `f668553` carries those test fixes and is the commit above. Product
+      code changed in `e580fe3` (the Phase 4 fixes) and `93952ad` (the compile fix) only.
 - What CI cannot prove: device behaviour (the checklist in §8), a real provider's grant
   lifetime and write semantics, and the crash window between write and commit.
 
