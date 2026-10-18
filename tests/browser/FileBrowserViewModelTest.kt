@@ -22,9 +22,14 @@ import org.robolectric.annotation.Config
  *
  * The scan itself is not exercised here (no Documents/Downloads folders exist in this JVM);
  * these tests are about the recents plumbing.
+ *
+ * API 29, because Robolectric's API 30+ `Environment.isExternalStorageManager()` throws out of
+ * the un-shadowed framework instead of answering - nothing to do with what is tested here. On
+ * API 29 the storage check takes the permission branch, which Robolectric does emulate, and
+ * with nothing granted the ViewModel fills the list from the store with no scan to race it.
  */
 @RunWith(AndroidJUnit4::class)
-@Config(sdk = [35])
+@Config(sdk = [29])
 class FileBrowserViewModelTest {
 
     @get:Rule

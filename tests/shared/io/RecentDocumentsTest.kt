@@ -143,6 +143,24 @@ class RecentDocumentsTest {
     }
 
     @Test
+    fun aRepeatedEntry_collapsesToTheFirstOne() {
+        // The row lists key on the identity, so a store that somehow repeats one must not
+        // hand the UI a duplicate key; the newest-first order means the first wins.
+        context.getSharedPreferences("kern_browser", Context.MODE_PRIVATE)
+            .edit()
+            .putString(
+                "recents",
+                "[{\"identity\":\"content://com.example.provider/document/42\",\"name\":\"report.docx\",\"format\":\"WORD\",\"size\":2,\"modified\":2000}," +
+                    "{\"identity\":\"content://com.example.provider/document/42\",\"name\":\"report.docx\",\"format\":\"WORD\",\"size\":1,\"modified\":1000}]",
+            )
+            .apply()
+
+        val entries = RecentDocuments.list(context)
+        assertEquals(1, entries.size)
+        assertEquals(2L, entries[0].size)
+    }
+
+    @Test
     fun unreadableStoredEntries_doNotCrashTheList() {
         context.getSharedPreferences("kern_browser", Context.MODE_PRIVATE)
             .edit()

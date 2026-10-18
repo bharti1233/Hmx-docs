@@ -51,7 +51,10 @@ object RecentDocuments {
         val raw = prefs(context).getString(KEY, null).orEmpty()
         if (raw.isEmpty()) return emptyList()
         // Anything that is not this version's JSON is read as the old path-per-line format.
-        return runCatching { decode(raw) }.getOrElse { legacy(raw) }
+        val entries = runCatching { decode(raw) }.getOrElse { legacy(raw) }
+        // The row lists key on the identity, so a repeated one (a hand-edited or corrupted
+        // store) would be a duplicate key: collapse it here instead of crashing a list.
+        return entries.distinctBy { it.identity }
     }
 
     /** Records (or moves to the front) the document at [uri], which has just been opened. */
