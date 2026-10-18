@@ -653,10 +653,15 @@ object WordDocument {
         val numbering = doc.numbering ?: doc.createNumbering()
         // Ids above everything the document already uses, so an existing list keeps its own
         // definition and a num id POI would otherwise pick from a count cannot collide.
+        // These two are decimal attributes of a union schema type, which XmlBeans types as
+        // Object (the setter next to them takes a BigInteger just the same), hence the
+        // read-as-a-number dance.
         val lastAbstractId = numbering.getAbstractNums()
-            .maxOfOrNull { it.abstractNum.abstractNumId?.longValue() ?: -1L } ?: -1L
+            .mapNotNull { (it.abstractNum.abstractNumId as? Number)?.toLong() }
+            .maxOrNull() ?: -1L
         val lastNumId = numbering.getNums()
-            .maxOfOrNull { it.ctNum.numId?.longValue() ?: 0L } ?: 0L
+            .mapNotNull { (it.ctNum.numId as? Number)?.toLong() }
+            .maxOrNull() ?: 0L
         val abstractId = BigInteger.valueOf(lastAbstractId + 1)
         val numId = BigInteger.valueOf(lastNumId + 1)
 

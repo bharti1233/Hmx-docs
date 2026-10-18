@@ -1132,7 +1132,8 @@ class WordPreservationTest {
     /** A non-default section: the page size and margins of a real document. */
     private fun withSectionProperties(): ByteArray = docx { doc ->
         doc.createParagraph().createRun().setText("Body")
-        val sect = doc.document.body.sectPr ?: doc.document.body.addNewSectPr()
+        val body = doc.getDocument().getBody()
+        val sect = body.getSectPr() ?: body.addNewSectPr()
         (sect.pgSz ?: sect.addNewPgSz()).also {
             it.setW(BigInteger.valueOf(11906))
             it.setH(BigInteger.valueOf(16838))
