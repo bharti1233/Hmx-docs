@@ -949,8 +949,12 @@ class WordPreservationTest {
         val bytes = pictureBetweenText()
         val index = blockIndex(bytes, "before after")
         val after = WordDocument.applyEditsAndSerialize(bytes, mapOf(index to listOf(WordDocument.Run("before edited after"))))
-        assertEquals(listOf("t(before)", "img", "t( edited after)"), runOrder(after, "before"))
-        assertEquals(listOf("middle.png"), snapshot(after).pictures)
+        // The picture sits exactly at the character offset the inserted text starts at, so the
+        // text goes in front of it — the same rule as typing beside a picture in Word. Either
+        // way the picture stays between the words instead of moving to the start of the
+        // paragraph, which is what the old code did.
+        assertEquals(listOf("t(before edited )", "img", "t(after)"), runOrder(after, "before"))
+        assertEquals("the picture is still in the paragraph", 1, snapshot(after).pictures.size)
         assertEquals("before edited after", textOf(after, index))
     }
 
@@ -1004,12 +1008,16 @@ class WordPreservationTest {
                 .getRow(row).getCell(col).paragraphs.map { it.text ?: "" }
         }
 
-    private fun cellPictures(bytes: ByteArray, row: Int, col: Int): List<String> =
+    /**
+     * How many pictures the (row, col) cell of the first table holds. Counted rather than
+     * named: POI's addPicture ignores the file name it is handed and auto-names the stored
+     * data (image1.png), so only the presence can be asserted.
+     */
+    private fun cellPictureCount(bytes: ByteArray, row: Int, col: Int): Int =
         XWPFDocument(ByteArrayInputStream(bytes)).use { doc ->
             doc.bodyElements.filterIsInstance<XWPFTable>().first()
                 .getRow(row).getCell(col).paragraphs
-                .flatMap { p -> p.runs.flatMap { run -> run.embeddedPictures ?: emptyList() } }
-                .mapNotNull { it.pictureData?.fileName }
+                .sumOf { p -> p.runs.sumOf { run -> run.embeddedPictures.size } }
         }
 
     private fun cellIsBold(bytes: ByteArray, row: Int, col: Int): Boolean =
@@ -1039,7 +1047,7 @@ class WordPreservationTest {
         assertEquals("the cell keeps both paragraphs", listOf("First", "Second"), cellLines(after, 0, 0))
         assertEquals("the bold cell keeps its text", listOf("Bold"), cellLines(after, 0, 1))
         assertTrue("the bold cell is still bold", cellIsBold(after, 0, 1))
-        assertEquals("the cell keeps its picture", listOf("cell.png"), cellPictures(after, 1, 1))
+        assertEquals("the cell keeps its picture", 1, cellPictureCount(after, 1, 1))
         assertEquals("the empty cell stays empty", listOf(""), cellLines(after, 1, 0))
     }
 
@@ -1054,7 +1062,7 @@ class WordPreservationTest {
         assertEquals("the edited cell took the new text", listOf("Bold edited"), cellLines(after, 0, 1))
         assertTrue("the edited cell keeps its formatting", cellIsBold(after, 0, 1))
         assertEquals("the two-paragraph cell is untouched", listOf("First", "Second"), cellLines(after, 0, 0))
-        assertEquals("the picture cell is untouched", listOf("cell.png"), cellPictures(after, 1, 1))
+        assertEquals("the picture cell is untouched", 1, cellPictureCount(after, 1, 1))
         assertEquals("the empty cell stays empty", listOf(""), cellLines(after, 1, 0))
         assertEquals(
             "the grid reads back with the edit",
@@ -1073,7 +1081,7 @@ class WordPreservationTest {
 
         assertEquals(listOf("First", "Second edited"), cellLines(after, 0, 0))
         assertEquals("the other cells are untouched", listOf("Bold"), cellLines(after, 0, 1))
-        assertEquals("the cell keeps its picture", listOf("cell.png"), cellPictures(after, 1, 1))
+        assertEquals("the cell keeps its picture", 1, cellPictureCount(after, 1, 1))
     }
 
     @Test
@@ -1083,7 +1091,7 @@ class WordPreservationTest {
         val after = editCell(bytes, index, row = 1, col = 1, text = "Caption text")
 
         assertEquals(listOf("Caption text"), cellLines(after, 1, 1))
-        assertEquals("the picture stays in the cell", listOf("cell.png"), cellPictures(after, 1, 1))
+        assertEquals("the picture stays in the cell", 1, cellPictureCount(after, 1, 1))
     }
 
     @Test
@@ -1166,7 +1174,9 @@ class WordPreservationTest {
      */
     private fun withUnmodelledXml(): ByteArray {
         val bytes = docx { doc ->
-            doc.createParagraph().createRun().setText("Subject")
+            // The first paragraph carries no text of its own, so what the editor reads back is
+            // exactly what the injected XML says.
+            doc.createParagraph().createRun()
             doc.createParagraph().createRun().setText("Elsewhere")
         }
         val before = part(bytes, "word/document.xml")
