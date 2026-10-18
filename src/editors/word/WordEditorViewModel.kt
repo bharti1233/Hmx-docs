@@ -39,6 +39,24 @@ private const val DEFAULT_PICTURE_WIDTH_PX = 384
 private const val DEFAULT_PICTURE_HEIGHT_PX = 288
 
 /**
+ * The message and the retry offer for a document that failed to open.
+ *
+ * The parser's own refusal of the bytes ([WordDocument.UnreadableContent]) is reported as
+ * what it is, because its message and retry decision were decided from the content.
+ * Everything else — a denied grant, a provider that stalled, a file that moved, an
+ * unknown storage failure — goes through the shared classification, so an access problem
+ * is never described as a bad document and the generic text stays the last resort.
+ *
+ * Top-level and free of Android types so the distinction is testable on the JVM.
+ */
+internal fun wordOpenFailure(failure: Throwable, readGrantHeld: Boolean): DocumentIo.LoadFailure =
+    if (failure is WordDocument.UnreadableContent) {
+        DocumentIo.LoadFailure(failure.userMessage, failure.canRetry)
+    } else {
+        DocumentIo.loadFailure(failure, "Could not open the document.", readGrantHeld)
+    }
+
+/**
  * Word editor state with full rich-text character formatting, paragraph/list styles,
  * interactive table mutations, find & replace, undo/redo history, and word counts.
  */
@@ -261,9 +279,15 @@ class WordEditorViewModel(app: Application) : AndroidViewModel(app) {
                 RecentDocuments.recordOpen(ctx, target, name, DocumentFormat.WORD, bytes.size.toLong())
                 loading = false
             }.onFailure { failure ->
-                val problem = DocumentIo.loadFailure(
+                if (failure is WordDocument.UnreadableContent) {
+                    // The read stage logs its own failures (DocumentIo.readBytes); the
+                    // parser's refusal is the one that used to leave no trace, so it is
+                    // logged here: content kind and exception classes, nothing about the
+                    // document itself.
+                    DocumentIo.logLoadFailure("reading the Word package (${failure.kind})", failure)
+                }
+                val problem = wordOpenFailure(
                     failure,
-                    "Could not open the document.",
                     DocumentIo.persistedAccess(ctx, target).contains(DocumentIo.UriAccess.READ),
                 )
                 error = problem.message

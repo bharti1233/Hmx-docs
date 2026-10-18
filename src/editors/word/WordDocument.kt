@@ -24,6 +24,7 @@ import org.openxmlformats.schemas.wordprocessingml.x2006.main.CTTcPr
 import org.openxmlformats.schemas.wordprocessingml.x2006.main.STNumberFormat
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
+import java.io.IOException
 import java.math.BigInteger
 
 /**
@@ -200,8 +201,79 @@ object WordDocument {
      */
     data class Parsed(val blocks: List<Block>, val elementIndices: List<Int>)
 
+    /**
+     * What the bytes turned out to be when they could not be read as a Word document.
+     * Decided from the content itself, never from a file name or a provider's MIME type:
+     * an "Open with" hand-off can name a Word format the bytes are not.
+     */
+    enum class UnreadableKind {
+        /** No bytes at all: an empty file, or a provider that returned nothing. */
+        EMPTY,
+
+        /** The OLE2 container of Word 97-2003: a .doc, which this document model cannot read. */
+        LEGACY_DOC,
+
+        /** Not a package at all (text, RTF, PDF, ...), so not a document this editor can read. */
+        NOT_WORD,
+
+        /** An OOXML package the parser refused: a truncation, a missing part, damaged XML. */
+        DAMAGED,
+    }
+
+    /**
+     * Bytes [read] refused: [kind] is what they actually are, [userMessage] says what the
+     * user can act on, and [canRetry] is false when re-reading cannot change the outcome
+     * because the bytes — not the access to them — are the problem. The parser's own
+     * failure stays as the cause, so diagnostics keep the exception chain.
+     */
+    class UnreadableContent(
+        val kind: UnreadableKind,
+        val userMessage: String,
+        val canRetry: Boolean,
+        cause: Throwable,
+    ) : IOException(userMessage, cause)
+
     fun read(bytes: ByteArray): Parsed =
-        XWPFDocument(ByteArrayInputStream(bytes)).use { readDocument(it) }
+        try {
+            XWPFDocument(ByteArrayInputStream(bytes)).use { readDocument(it) }
+        } catch (failure: Exception) {
+            // An Error (out of memory on a huge package) is not a statement about the
+            // bytes; it falls through to the caller's generic failure handling.
+            throw unreadableContent(bytes, failure)
+        }
+
+    /**
+     * Classifies a parser refusal by what the bytes are: the four container signatures are
+     * cheap to check, so a legacy .doc, a file that never came through, or a truncation gets
+     * a message that names the problem instead of the same generic failure for all of them.
+     */
+    private fun unreadableContent(bytes: ByteArray, failure: Exception): UnreadableContent =
+        when {
+            bytes.isEmpty() -> UnreadableContent(
+                UnreadableKind.EMPTY,
+                "The file came back empty. It may still be downloading, or it may hold no content.",
+                canRetry = true,
+                cause = failure,
+            )
+            bytes.hasSignature(0xD0, 0xCF, 0x11, 0xE0) -> UnreadableContent(
+                UnreadableKind.LEGACY_DOC,
+                "This is an older Word file (.doc). This editor opens .docx documents.",
+                canRetry = false,
+                cause = failure,
+            )
+            bytes.hasSignature(0x50, 0x4B) -> UnreadableContent(
+                UnreadableKind.DAMAGED,
+                "This document could not be read. It may be damaged or not fully downloaded.",
+                canRetry = true,
+                cause = failure,
+            )
+            else -> UnreadableContent(
+                UnreadableKind.NOT_WORD,
+                "This file is not a .docx document.",
+                canRetry = false,
+                cause = failure,
+            )
+        }
 
     /**
      * The block layout of an already open document, with the body-element index of every

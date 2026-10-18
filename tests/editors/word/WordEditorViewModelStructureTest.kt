@@ -24,6 +24,7 @@ import org.junit.runner.RunWith
 import org.openxmlformats.schemas.wordprocessingml.x2006.main.STMerge
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
+import dev.kern.shared.io.RecentDocuments
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -392,6 +393,121 @@ class WordEditorViewModelStructureTest {
         assertTrue("the span is still in the file", documentXml(uri).contains("gridSpan"))
         val rows = (WordDocument.read(saved(uri)).blocks[index] as WordDocument.TableBlock).rows
         assertTrue("the text edit is saved", rows.any { row -> row.contains("Plain edited") })
+    }
+
+    // ---- a document the parser refuses: what the editor says and keeps --------
+
+    @Test
+    fun openingAnEmptyFile_saysTheReadCameBackEmptyAndOffersAnother() {
+        val vm = viewModel()
+        val uri = docxFile("empty.docx", ByteArray(0))
+        vm.start(uri.toString())
+        await("the load did not finish") { !vm.loading }
+
+        assertTrue(
+            "the message says what happened, was: ${vm.error}",
+            vm.error?.contains("empty", ignoreCase = true) == true,
+        )
+        assertTrue("a read that came back empty can come in next time", vm.canRetry)
+        assertTrue("no title is shown for a document that never opened", vm.fileName.isBlank())
+        assertTrue("and no content either", vm.blocks.isEmpty())
+        assertTrue("a failed open is not remembered", RecentDocuments.list(app).isEmpty())
+    }
+
+    @Test
+    fun openingALegacyDocPointsAtTheOlderFormatInsteadOfOfferingARetry() {
+        val ole = ByteArray(1024).also {
+            it[0] = 0xD0.toByte()
+            it[1] = 0xCF.toByte()
+            it[2] = 0x11
+            it[3] = 0xE0.toByte()
+        }
+        val vm = viewModel()
+        val uri = docxFile("letter.doc", ole)
+        vm.start(uri.toString())
+        await("the load did not finish") { !vm.loading }
+
+        assertTrue(
+            "the message names the older format, was: ${vm.error}",
+            vm.error?.contains("older Word file", ignoreCase = true) == true,
+        )
+        assertFalse("re-reading cannot turn a .doc into a .docx", vm.canRetry)
+        assertTrue("and nothing is shown as content", vm.blocks.isEmpty())
+    }
+
+    @Test
+    fun openingPlainTextNamedDocx_isRefusedAsNotADocument() {
+        val vm = viewModel()
+        val uri = docxFile("notes.docx", "just text, not a package".toByteArray())
+        vm.start(uri.toString())
+        await("the load did not finish") { !vm.loading }
+
+        assertTrue(
+            "the message says it is not a .docx, was: ${vm.error}",
+            vm.error?.contains("not a .docx") == true,
+        )
+        assertFalse("the bytes will not change on another read", vm.canRetry)
+        assertTrue("and no document is left behind", vm.blocks.isEmpty())
+    }
+
+    @Test
+    fun openingATruncatedDocument_saysItIsDamagedAndKeepsTheEditorEmpty() {
+        val full = twoParagraphs()
+        val vm = viewModel()
+        val uri = docxFile("half.docx", full.copyOf(full.size * 4 / 10))
+        vm.start(uri.toString())
+        await("the load did not finish") { !vm.loading }
+
+        assertTrue(
+            "the message mentions the damage, was: ${vm.error}",
+            vm.error?.contains("damaged", ignoreCase = true) == true,
+        )
+        assertTrue("a short read can be tried again", vm.canRetry)
+        assertTrue("a refused document is shown as no content, not as part of one", vm.blocks.isEmpty())
+        assertTrue("no title either", vm.fileName.isBlank())
+        assertTrue("and it is not remembered", RecentDocuments.list(app).isEmpty())
+    }
+
+    @Test
+    fun aProviderFailure_isNotReportedAsBadDocumentContent() {
+        // No provider serves this authority, so the read itself is what fails. Which of the
+        // access messages the resolver produces is pinned by DocumentIoTest; here the point
+        // is that the editor does not blame the document's content for it.
+        val vm = viewModel()
+        vm.start("content://dev.kern.documents.absent/document/1")
+        await("the load did not finish") { !vm.loading }
+
+        val message = vm.error
+        assertTrue("the editor reports the failure", message != null)
+        assertFalse("the document itself is not blamed, was: $message", message!!.contains(".docx"))
+        assertTrue("nothing is loaded from a refused read", vm.blocks.isEmpty())
+        assertTrue("and no title is shown", vm.fileName.isBlank())
+    }
+
+    @Test
+    fun retry_readsTheSameUriAgainAndLeavesOneRecentEntry() {
+        val file = folder.newFile("later.docx")
+        file.writeBytes(ByteArray(0))
+        val vm = viewModel()
+        vm.start(Uri.fromFile(file).toString())
+        await("the first load did not finish") { !vm.loading }
+        assertTrue("the empty file is refused first", vm.error != null)
+        assertTrue("nothing is remembered yet", RecentDocuments.list(app).isEmpty())
+
+        file.writeBytes(twoParagraphs())
+        vm.retry()
+        await("the retry did not finish") { !vm.loading }
+
+        assertNull("the retry opens the document", vm.error)
+        assertEquals("later.docx", vm.fileName)
+        assertEquals(
+            "the same file is read, not a copy",
+            2,
+            vm.blocks.filterIsInstance<WordDocument.ParagraphBlock>().size,
+        )
+        val entries = RecentDocuments.list(app)
+        assertEquals("one entry for one document, however many attempts", 1, entries.size)
+        assertEquals("the entry is the original file", file.absolutePath, entries.single().identity)
     }
 
     private companion object {

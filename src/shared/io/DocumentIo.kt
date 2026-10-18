@@ -66,7 +66,7 @@ object DocumentIo {
                 ?: throw FileNotFoundException(NO_STREAM)
         } catch (failure: Throwable) {
             // Provider and failure kind only: no document name, path or content.
-            Log.w(TAG, "Read failed (${failure.javaClass.simpleName}) from ${uri.authority}")
+            Log.w(TAG, "Read failed (${failure.classChain()}) from ${uri.authority}")
             throw failure
         }
     }
@@ -352,6 +352,27 @@ object DocumentIo {
             return modes
         }
     }
+
+    // ---- Diagnostics --------------------------------------------------------
+
+    /**
+     * One line about a document that could not be opened: the [stage] it failed at and the
+     * exception classes behind it. An exception's own message can name the document, its
+     * path or its provider, so only the classes are logged — enough to tell a parser
+     * refusal from a provider or storage failure without recording anything about the file.
+     *
+     * A failed read is already logged by [readBytes]; this covers the stages after it, so
+     * one failure never produces two lines.
+     */
+    fun logLoadFailure(stage: String, failure: Throwable) {
+        Log.w(TAG, "Could not open the document at $stage: ${failure.classChain()}")
+    }
+
+    /** The exception classes of [this] failure's cause chain, outermost first. */
+    private fun Throwable.classChain(): String =
+        generateSequence(this) { it.cause }
+            .take(4)
+            .joinToString(" <- ") { it.javaClass.simpleName }
 
     // ---- User-facing failure text -------------------------------------------
 

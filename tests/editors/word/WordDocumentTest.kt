@@ -3,10 +3,16 @@ package dev.kern.editors.word
 import org.apache.poi.xwpf.usermodel.XWPFDocument
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Test
+import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
+import java.util.zip.ZipEntry
+import java.util.zip.ZipInputStream
+import java.util.zip.ZipOutputStream
 
 class WordDocumentTest {
 
@@ -180,5 +186,100 @@ class WordDocumentTest {
         assertEquals(2, table.rows.size)
         assertEquals("Updated Cell", table.rows[0][0])
         assertEquals("New Row Cell", table.rows[1][0])
+    }
+
+    // ---- input that is not a readable Word document ---------------------------
+
+    /** [docx] with word/document.xml stopped mid-element, the shape a damaged file has. */
+    private fun docxWithCutDocumentXml(docx: ByteArray): ByteArray {
+        val out = ByteArrayOutputStream()
+        ZipInputStream(ByteArrayInputStream(docx)).use { zip ->
+            ZipOutputStream(out).use { copy ->
+                var entry = zip.nextEntry
+                while (entry != null) {
+                    copy.putNextEntry(ZipEntry(entry.name))
+                    val content = zip.readBytes()
+                    if (entry.name == "word/document.xml") {
+                        copy.write(content, 0, content.size / 2)
+                    } else {
+                        copy.write(content)
+                    }
+                    copy.closeEntry()
+                    entry = zip.nextEntry
+                }
+            }
+        }
+        return out.toByteArray()
+    }
+
+    /** The refusal [WordDocument.read] must produce for [bytes]; fails if it opens them. */
+    private fun refusal(bytes: ByteArray): WordDocument.UnreadableContent {
+        val opened = runCatching { WordDocument.read(bytes) }
+        val failure = opened.exceptionOrNull()
+        assertTrue(
+            "these bytes are not a readable Word document, but reading produced " +
+                "${opened.getOrNull()?.blocks?.size} blocks",
+            failure is WordDocument.UnreadableContent,
+        )
+        return failure as WordDocument.UnreadableContent
+    }
+
+    /** The OLE2 container of Word 97-2003, as a legacy .doc starts. */
+    private fun legacyDoc(): ByteArray = ByteArray(1024).also {
+        it[0] = 0xD0.toByte()
+        it[1] = 0xCF.toByte()
+        it[2] = 0x11
+        it[3] = 0xE0.toByte()
+    }
+
+    private data class UnreadableCase(
+        val label: String,
+        val bytes: ByteArray,
+        val kind: WordDocument.UnreadableKind,
+        val canRetry: Boolean,
+    )
+
+    @Test
+    fun read_unreadableInput_isRefusedWithTheKindItIsAndTheRetryItDeserves() {
+        val full = sampleRichDocx()
+        val cases = listOf(
+            UnreadableCase("nothing was read", ByteArray(0), WordDocument.UnreadableKind.EMPTY, canRetry = true),
+            UnreadableCase(
+                "plain text",
+                "<html>not a word file</html>".toByteArray(),
+                WordDocument.UnreadableKind.NOT_WORD,
+                canRetry = false,
+            ),
+            UnreadableCase(
+                "a Word 97-2003 container",
+                legacyDoc(),
+                WordDocument.UnreadableKind.LEGACY_DOC,
+                canRetry = false,
+            ),
+            UnreadableCase(
+                "a package that stopped mid-file",
+                full.copyOf(full.size * 4 / 10),
+                WordDocument.UnreadableKind.DAMAGED,
+                canRetry = true,
+            ),
+        )
+        for (case in cases) {
+            val refused = refusal(case.bytes)
+            assertEquals(case.label, case.kind, refused.kind)
+            assertTrue("${case.label}: the user is told what happened", refused.userMessage.isNotBlank())
+            assertEquals("${case.label}: another read is offered only when it can help", case.canRetry, refused.canRetry)
+            assertNotNull("${case.label}: the parser's own failure is kept as the cause", refused.cause)
+        }
+    }
+
+    @Test
+    fun read_packageWithCutXml_isRefusedAsDamageAndKeepsTheXmlFailure() {
+        val refused = refusal(docxWithCutDocumentXml(sampleRichDocx()))
+        assertEquals(WordDocument.UnreadableKind.DAMAGED, refused.kind)
+        assertTrue("a short read can be tried again", refused.canRetry)
+        assertTrue(
+            "the cause chain names the XML failure, was ${refused.cause?.javaClass?.simpleName}",
+            generateSequence(refused.cause) { it.cause }.any { it.javaClass.simpleName == "XmlException" },
+        )
     }
 }
