@@ -294,6 +294,13 @@ environment `[inference]`.
 - The pre-write check is package-level, not semantic: it catches output that is truncated or
   unopenable, and the stored file is not re-read after a successful write, so a provider that
   keeps less than it was handed is not detected. `[docs]`
+- A file that cannot be read as a Word document is classified from its first bytes (an empty
+  read, the OLE2 container of a legacy `.doc`, not a package, an OOXML package the parser
+  refused), so the message names the problem instead of one generic line, and the parser's
+  refusal is logged with that kind and its exception classes — never the document's name,
+  path or content. The container signature is the only content check made at open: a `.zip`
+  or `.odt` renamed to `.docx` reads as a damaged package, and a `.docx` whose body is not
+  Word's is reported as damaged rather than as "not a document". `[code]`
 - The failure classification and the retry decision are unit-tested against a faked resolver
   (`tests/shared/DocumentIoTest.kt`). Which exception a real provider throws for a revoked
   grant, and what a device shows after a force-stop, is device work (§8) `[not-verified]`.
@@ -599,13 +606,31 @@ files for the round-trip cases.
 40. **Split inside a section.** In a document with more than one section, press Enter in a
     paragraph that ends a section, save, reopen in Word. *Expected:* there is still one
     section break (not two) and the document still opens with the same page setup.
+41. **A legacy .doc.** Open a Word 97-2003 file (`.doc`) from the Files app with "Open with
+    → Kern Docs". *Expected:* the editor says it is an older Word file and offers no
+    "Try again"; nothing is added to Recent.
+42. **A file that is not a .docx.** Open a text file renamed to `.docx`, then a `.docx` cut
+    short (copy a valid one and truncate it). *Expected:* "This file is not a .docx
+    document." for the first, with no retry; "This document could not be read. It may be
+    damaged or not fully downloaded." for the second, with "Try again"; neither shows
+    content or enters Recent.
+43. **A file that has not arrived.** With the device offline, open a cloud document
+    (Drive/OneDrive) that is not downloaded. *Expected:* the empty-read message and a
+    "Try again" button; once it downloads, "Try again" opens the document and Recent gains
+    exactly one entry.
+44. **The log line.** With `adb logcat -s DocumentIo` running, repeat steps 41–43.
+    *Expected:* one line per failed open — `Could not open the document at reading the
+    Word package (<KIND>): UnreadableContent <- <parser class>` — and for a read that
+    fails, `Read failed (<class chain>) from <authority>`. Neither names the document,
+    its path or its content.
 
 Steps 4, 5 and 12 are the ones Phase 2's changes were meant to alter; steps 15–18 cover the
 access-recovery follow-up; steps 19–23 cover the Phase 3 save-safety changes; steps 24–25
 cover the rich-text editing fix (the editor, not the text field, owns formatting); steps 26–32
 cover the Phase 4 document-model fixes (lists, run order, table cells, tracked changes); steps
 33–40 cover the Phase 5 structured editing (Enter, paragraph actions, undo over them, list
-levels, table grid and spans, pictures, sections); steps
+levels, table grid and spans, pictures, sections); steps 41–44 cover the open-failure
+reporting and its log line; steps
 6–11 are the ones the preservation suite predicts and a device must confirm. A device is the
 only place any of them can be settled.
 
