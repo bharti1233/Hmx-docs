@@ -41,7 +41,7 @@ android {
     }
     // List unit dirs explicitly so tests/instrumented (androidTest) is not also
     // compiled as a unit test, which lacks the instrumented + compose-test deps.
-    sourceSets["test"].java.srcDirs("tests/editors", "tests/shared")
+    sourceSets["test"].java.srcDirs("tests/editors", "tests/shared", "tests/browser")
     sourceSets["androidTest"].java.srcDirs("tests/instrumented")
 
     compileOptions {

@@ -8,7 +8,8 @@ Kern is a single-Activity Android app built with Kotlin and Jetpack Compose. It 
 
 | Component | Location | Responsibility |
 |-----------|----------|----------------|
-| File browser | `src/browser/` | Scans Documents + Downloads, renders the file list |
+| File browser | `src/browser/` | Scans Documents + Downloads, renders the file list, pins and Recent |
+| Recent documents | `src/shared/io/RecentDocuments.kt` | Remembers opened documents (paths and provider URIs) across restarts |
 | Intent receiver | `src/browser/IntentHandler.kt` | Receives "Open with" intents, routes to the correct editor |
 | CSV editor | `src/editors/csv/` | OpenCSV-backed table editor |
 | Excel editor | `src/editors/excel/` | Apache POI xlsx |
@@ -66,8 +67,14 @@ crashing. See [src/pdf-bridge/README.md](../src/pdf-bridge/README.md).
 1. User taps a file in the browser, or shares a file to Kern via "Open with".
 2. `IntentHandler` resolves the MIME type, picks the editor, and passes the URI.
 3. The editor opens the file (via SAF URI or direct path) and loads it into memory.
-4. Compose renders the editable state.
-5. On save, the editor writes back to the original URI/path. The replacement is
+4. A document enters Recent the moment its editor has loaded it successfully — whichever
+   route brought the user there (scan, system picker, "Open with"). The entry keeps a
+   display name, format, size and time, and the identity used to reopen it: an absolute
+   path for scanned files, the content URI for provider documents. A failed open records
+   nothing; a successful save refreshes the entry's size and time (`src/shared/io/RecentDocuments.kt`,
+   SharedPreferences `kern_browser/recents`, same store older versions wrote).
+5. Compose renders the editable state.
+6. On save, the editor writes back to the original URI/path. The replacement is
    serialized in full and checked for package integrity before the destination is
    touched; a local file is replaced by renaming a complete temporary file over it, a
    provider file by a guarded write that keeps the previous content as a rollback copy.

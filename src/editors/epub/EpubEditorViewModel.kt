@@ -9,7 +9,9 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import dev.kern.shared.DocumentFormat
 import dev.kern.shared.io.DocumentIo
+import dev.kern.shared.io.RecentDocuments
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -110,6 +112,8 @@ class EpubEditorViewModel(app: Application) : AndroidViewModel(app) {
                 bookTitle = parsed.title
                 originalBytes = bytes
                 chapters = parsed.chapters
+                // The document opened: it belongs in the home screen's Recent list from here on.
+                RecentDocuments.recordOpen(ctx, target, name, DocumentFormat.EPUB, bytes.size.toLong())
                 loading = false
             }.onFailure { failure ->
                 val problem = DocumentIo.loadFailure(
@@ -157,8 +161,12 @@ class EpubEditorViewModel(app: Application) : AndroidViewModel(app) {
                     // Checked before the destination is opened: a package that would not
                     // read back never replaces the document on disk.
                     DocumentIo.writeBytes(ctx, target, serialized, DocumentIo::verifyZipPackage)
+                    serialized.size.toLong()
                 }
             }
+            // A failed save never reaches this line, so the Recent list cannot report one as
+            // successful. Only the entry of the document that was actually written changes.
+            result.getOrNull()?.let { RecentDocuments.noteSaved(ctx, target, it) }
             onResult(result.isSuccess, DocumentIo.saveError(result.exceptionOrNull(), "Could not save the document. Use Export to save a copy."))
         }
     }

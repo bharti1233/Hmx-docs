@@ -10,7 +10,9 @@ import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import dev.kern.pdfbridge.QyraPdf
+import dev.kern.shared.DocumentFormat
 import dev.kern.shared.io.DocumentIo
+import dev.kern.shared.io.RecentDocuments
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -103,6 +105,8 @@ class PdfEditorViewModel(app: Application) : AndroidViewModel(app) {
                 fileName = name
                 document = doc
                 pageCount = doc.pageCount
+                // The document opened: it belongs in the home screen's Recent list from here on.
+                RecentDocuments.recordOpen(ctx, target, name, DocumentFormat.PDF, doc.size.coerceAtLeast(0))
                 loading = false
             }.onFailure { failure ->
                 val problem = DocumentIo.loadFailure(

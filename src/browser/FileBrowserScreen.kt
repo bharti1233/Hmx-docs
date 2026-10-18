@@ -108,6 +108,7 @@ fun FileBrowserScreen(
     val scope = rememberCoroutineScope()
 
     var menuDoc by remember { mutableStateOf<ScannedDoc?>(null) }
+    var menuFromRecent by remember { mutableStateOf(false) }
     var infoDoc by remember { mutableStateOf<ScannedDoc?>(null) }
     var deleteDoc by remember { mutableStateOf<ScannedDoc?>(null) }
     var sortOpen by remember { mutableStateOf(false) }
@@ -167,9 +168,13 @@ fun FileBrowserScreen(
         }
     }
 
-    fun openScanned(doc: ScannedDoc) {
-        vm.recordOpen(doc)
-        onOpenDocument(doc.format, Uri.encode(Uri.fromFile(File(doc.path)).toString()))
+    /**
+     * Opens whatever a row stands for: a scanned file by its path, a remembered provider
+     * document by its own URI. The document is recorded in Recent by the editor once it has
+     * loaded, not here — a tap that fails to open must not leave an entry behind.
+     */
+    fun openDoc(doc: ScannedDoc) {
+        onOpenDocument(doc.format, Uri.encode(doc.openUri()))
     }
 
     Scaffold(
@@ -206,8 +211,12 @@ fun FileBrowserScreen(
                             Modifier.align(Alignment.Center),
                             color = KernTheme.colors.accent,
                         )
-                        vm.view == BrowserView.RECENT -> RecentView(vm, ::openScanned) { menuDoc = it }
-                        else -> AllView(vm, onSortClick = { sortOpen = true }, onOpen = ::openScanned) { menuDoc = it }
+                        vm.view == BrowserView.RECENT -> RecentView(vm, ::openDoc) {
+                            menuFromRecent = true; menuDoc = it
+                        }
+                        else -> AllView(vm, onSortClick = { sortOpen = true }, onOpen = ::openDoc) {
+                            menuFromRecent = false; menuDoc = it
+                        }
                     }
                 }
             }
@@ -220,16 +229,25 @@ fun FileBrowserScreen(
         ActionsSheet(
             doc = doc,
             pinned = vm.isPinned(doc),
-            onOpen = { openScanned(doc); menuDoc = null },
+            providerDocument = doc.isProviderDocument,
+            fromRecents = menuFromRecent,
+            onOpen = { openDoc(doc); menuDoc = null },
             onTogglePin = { vm.togglePin(doc); menuDoc = null },
             onShare = { shareDoc(context, doc); menuDoc = null },
             onInfo = { infoDoc = doc; menuDoc = null },
             onDelete = { deleteDoc = doc; menuDoc = null },
+            onRemoveRecent = { vm.removeRecent(doc.path); menuDoc = null },
             onClose = { menuDoc = null },
         )
     }
 
-    infoDoc?.let { doc -> FileInfoDialog(doc) { infoDoc = null } }
+    infoDoc?.let { doc ->
+        FileInfoDialog(
+            doc = doc,
+            location = if (doc.isProviderDocument) null else File(doc.path).parent ?: doc.path,
+            onClose = { infoDoc = null },
+        )
+    }
 
     deleteDoc?.let { doc ->
         AlertDialog(
@@ -660,29 +678,37 @@ private fun sortDirectionLabel(key: SortKey, ascending: Boolean): String = when 
 private fun ActionsSheet(
     doc: ScannedDoc,
     pinned: Boolean,
+    providerDocument: Boolean,
+    fromRecents: Boolean,
     onOpen: () -> Unit,
     onTogglePin: () -> Unit,
     onShare: () -> Unit,
     onInfo: () -> Unit,
     onDelete: () -> Unit,
+    onRemoveRecent: () -> Unit,
     onClose: () -> Unit,
 ) {
     KernBottomSheet(onDismiss = onClose, title = doc.name) {
         SheetActionRow(KernIcons.Doc, "Open", onOpen)
-        SheetActionRow(
-            if (pinned) KernIcons.StarFilled else KernIcons.Star,
-            if (pinned) "Unpin" else "Pin to top",
-            onTogglePin,
-        )
-        SheetActionRow(KernIcons.Share, "Share a copy", onShare)
+        // Pin, share and delete work on files by path; a document the system picker handed
+        // over lives at a provider URI, so only the actions that fit it are offered.
+        if (!providerDocument) {
+            SheetActionRow(
+                if (pinned) KernIcons.StarFilled else KernIcons.Star,
+                if (pinned) "Unpin" else "Pin to top",
+                onTogglePin,
+            )
+            SheetActionRow(KernIcons.Share, "Share a copy", onShare)
+        }
         SheetActionRow(KernIcons.Info, "File info", onInfo)
-        SheetActionRow(KernIcons.Trash, "Delete", onDelete, danger = true)
+        if (fromRecents) SheetActionRow(KernIcons.Close, "Remove from Recent", onRemoveRecent)
+        if (!providerDocument) SheetActionRow(KernIcons.Trash, "Delete", onDelete, danger = true)
         Spacer(Modifier.height(12.dp))
     }
 }
 
 @Composable
-private fun FileInfoDialog(doc: ScannedDoc, onClose: () -> Unit) {
+private fun FileInfoDialog(doc: ScannedDoc, location: String?, onClose: () -> Unit) {
     AlertDialog(
         onDismissRequest = onClose,
         containerColor = KernTheme.colors.surface,
@@ -693,7 +719,9 @@ private fun FileInfoDialog(doc: ScannedDoc, onClose: () -> Unit) {
                 InfoLine("Type", doc.format.label)
                 InfoLine("Size", prettySize(doc.size))
                 InfoLine("Modified", prettyDate(doc.modified))
-                InfoLine("Location", File(doc.path).parent ?: doc.path)
+                // A provider document has no path to show; the row is left out rather than
+                // printing its URI at the user.
+                if (location != null) InfoLine("Location", location)
             }
         },
     )
@@ -709,6 +737,13 @@ private fun InfoLine(label: String, value: String) {
 
 /** EPUB is read-only in this alpha; everything else is editable. */
 private val ScannedDoc.viewOnly: Boolean get() = format == DocumentFormat.EPUB
+
+/** A remembered provider document carries its URI in [ScannedDoc.path]; a scanned file its path. */
+private val ScannedDoc.isProviderDocument: Boolean get() = path.startsWith("content://")
+
+/** The URI a row opens: a provider document by its own URI, a file by its path. */
+private fun ScannedDoc.openUri(): String =
+    if (isProviderDocument) path else Uri.fromFile(File(path)).toString()
 
 private fun shareDoc(context: android.content.Context, doc: ScannedDoc) {
     val uri = androidx.core.content.FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", File(doc.path))
@@ -728,5 +763,7 @@ private fun prettySize(bytes: Long): String {
     return if (mb < 1024) String.format("%.1f MB", mb) else String.format("%.1f GB", mb / 1024.0)
 }
 
+/** A relative time; "—" for an entry that carries no timestamp (an old entry whose file is gone). */
 private fun prettyDate(ms: Long): String =
-    DateUtils.getRelativeTimeSpanString(ms, System.currentTimeMillis(), DateUtils.MINUTE_IN_MILLIS).toString()
+    if (ms <= 0L) "—"
+    else DateUtils.getRelativeTimeSpanString(ms, System.currentTimeMillis(), DateUtils.MINUTE_IN_MILLIS).toString()

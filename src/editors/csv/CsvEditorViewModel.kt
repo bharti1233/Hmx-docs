@@ -12,7 +12,9 @@ import androidx.compose.runtime.toMutableStateList
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import dev.kern.shared.DocumentFormat
 import dev.kern.shared.io.DocumentIo
+import dev.kern.shared.io.RecentDocuments
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -91,15 +93,18 @@ class CsvEditorViewModel(app: Application) : AndroidViewModel(app) {
             val result = withContext(Dispatchers.IO) {
                 runCatching {
                     DocumentIo.persistAccess(ctx, target)
-                    DocumentIo.displayName(ctx, target) to CsvDocument.parse(DocumentIo.readText(ctx, target))
+                    val bytes = DocumentIo.readBytes(ctx, target)
+                    Triple(DocumentIo.displayName(ctx, target), bytes, CsvDocument.parse(String(bytes, Charsets.UTF_8)))
                 }
             }
-            result.onSuccess { (name, grid) ->
+            result.onSuccess { (name, bytes, grid) ->
                 fileName = name
                 rows.clear()
                 grid.forEach { rows.add(it.toMutableStateList()) }
                 selectedRow = 0
                 selectedCol = 0
+                // The document opened: it belongs in the home screen's Recent list from here on.
+                RecentDocuments.recordOpen(ctx, target, name, DocumentFormat.CSV, bytes.size.toLong())
                 loading = false
             }.onFailure { failure ->
                 val problem = DocumentIo.loadFailure(
@@ -207,8 +212,15 @@ class CsvEditorViewModel(app: Application) : AndroidViewModel(app) {
         val ctx = getApplication<Application>()
         viewModelScope.launch {
             val result = withContext(Dispatchers.IO) {
-                runCatching { DocumentIo.writeText(ctx, target, CsvDocument.toCsv(snapshot)) }
+                runCatching {
+                    val bytes = CsvDocument.toCsv(snapshot).toByteArray(Charsets.UTF_8)
+                    DocumentIo.writeBytes(ctx, target, bytes)
+                    bytes.size.toLong()
+                }
             }
+            // A failed save never reaches this line, so the Recent list cannot report one as
+            // successful. Only the entry of the document that was actually written changes.
+            result.getOrNull()?.let { RecentDocuments.noteSaved(ctx, target, it) }
             onResult(result.isSuccess, DocumentIo.saveError(result.exceptionOrNull(), "Could not save the document. Use Export to save a copy."))
         }
     }

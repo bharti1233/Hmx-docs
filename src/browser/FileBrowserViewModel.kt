@@ -7,6 +7,8 @@ import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import dev.kern.shared.DocumentFormat
+import dev.kern.shared.io.RecentDocument
+import dev.kern.shared.io.RecentDocuments
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -33,7 +35,7 @@ class FileBrowserViewModel(app: Application) : AndroidViewModel(app) {
     private var docs by mutableStateOf<List<ScannedDoc>>(emptyList())
     var pins by mutableStateOf<Set<String>>(emptySet())
         private set
-    private var recents by mutableStateOf<List<String>>(emptyList())
+    private var recents by mutableStateOf<List<RecentDocument>>(emptyList())
 
     var view by mutableStateOf(BrowserView.RECENT)
         private set
@@ -63,7 +65,7 @@ class FileBrowserViewModel(app: Application) : AndroidViewModel(app) {
         val ctx = getApplication<Application>()
         hasAccess = FileScanner.hasAccess(ctx)
         pins = store.pins()
-        recents = store.recents()
+        recents = RecentDocuments.list(ctx)
         if (!hasAccess) {
             docs = emptyList()
             loadedKey = null
@@ -105,7 +107,17 @@ class FileBrowserViewModel(app: Application) : AndroidViewModel(app) {
     val recentDocs: List<ScannedDoc>
         get() {
             val byPath = docs.associateBy { it.path }
-            return recents.mapNotNull { byPath[it] }.filter { matchesQuery(it) }
+            return recents.map { entry ->
+                val scanned = byPath[entry.identity]
+                when {
+                    scanned == null -> entry.asScannedDoc()
+                    // The scan describes the file on disk, so it wins while it is at least as
+                    // fresh as what the app recorded. After a save it is not: the scan has not
+                    // run again, so the stored entry (new size, just-written time) is shown.
+                    scanned.modified >= entry.modified -> scanned
+                    else -> scanned.copy(size = entry.size, modified = entry.modified)
+                }
+            }.filter { matchesQuery(it) }
         }
 
     val allDocs: List<ScannedDoc>
@@ -131,9 +143,12 @@ class FileBrowserViewModel(app: Application) : AndroidViewModel(app) {
         pins = store.pins()
     }
 
-    fun recordOpen(d: ScannedDoc) {
-        store.recordOpen(d.path)
-        recents = store.recents()
+    /** Removes one entry from Recent. Used by the list's "Remove from Recent" action; the
+     *  file itself is untouched, and a document opened again is recorded again. */
+    fun removeRecent(identity: String) {
+        val ctx = getApplication<Application>()
+        RecentDocuments.remove(ctx, identity)
+        recents = RecentDocuments.list(ctx)
     }
 
     /** Deletes the file from disk and prunes it from pins/recents. Returns success. */
@@ -143,8 +158,11 @@ class FileBrowserViewModel(app: Application) : AndroidViewModel(app) {
             store.forget(d.path)
             docs = docs.filter { it.path != d.path }
             pins = store.pins()
-            recents = store.recents()
+            recents = RecentDocuments.list(getApplication())
         }
         return ok
     }
+
+    /** A stored recent entry as the row/card UI renders it; [ScannedDoc.path] is the identity. */
+    private fun RecentDocument.asScannedDoc() = ScannedDoc(identity, name, format, size, modified)
 }

@@ -29,6 +29,9 @@ class PdfDocument private constructor(
 
     val pageCount: Int get() = renderer.pageCount
 
+    /** The document's byte size as the descriptor reports it; -1 when unknown. */
+    val size: Long get() = pfd.statSize
+
     /**
      * Renders [index] into an ARGB bitmap [targetWidthPx] wide, height following the
      * page aspect ratio. The page is painted onto a white background first, since
