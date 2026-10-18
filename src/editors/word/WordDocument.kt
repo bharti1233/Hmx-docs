@@ -405,10 +405,12 @@ object WordDocument {
 
             is BlockOp.InsertImage -> {
                 if (op.bytes.isEmpty()) throw IllegalStateException("The picture has no data")
+                val type = pictureTypeOf(op.bytes)
+                    ?: throw IllegalStateException("That file is not a picture this editor can place")
                 val holder = insertParagraph(doc, objects, if (op.after < 0) -1 else elementIndexOf(op.after))
                 holder.createRun().addPicture(
                     ByteArrayInputStream(op.bytes),
-                    pictureTypeOf(op.bytes, op.fileName),
+                    type,
                     op.fileName?.takeIf { it.isNotBlank() } ?: "image",
                     op.widthEmu.coerceAtLeast(1),
                     op.heightEmu.coerceAtLeast(1),
@@ -505,19 +507,19 @@ object WordDocument {
     }
 
     /**
-     * The OOXML picture type of an image, taken from its file signature. The type decides the
-     * content type and the extension of the package part the bytes are stored in, so the bytes
-     * decide it, not the name the file happened to be picked under.
+     * The OOXML picture type of an image, taken from its file signature, or null when the bytes
+     * are not one of the formats this editor stores. The type decides the content type and the
+     * extension of the package part the bytes are stored in, so the bytes decide it, not the
+     * name the file happened to be picked under.
      */
-    private fun pictureTypeOf(bytes: ByteArray, fileName: String?): PictureType = when {
+    private fun pictureTypeOf(bytes: ByteArray): PictureType? = when {
         bytes.hasSignature(0x89, 0x50, 0x4E, 0x47) -> PictureType.PNG
         bytes.hasSignature(0xFF, 0xD8, 0xFF) -> PictureType.JPEG
         bytes.hasSignature(0x47, 0x49, 0x46, 0x38) -> PictureType.GIF
         bytes.hasSignature(0x42, 0x4D) -> PictureType.BMP
-        fileName?.endsWith(".jpg", ignoreCase = true) == true -> PictureType.JPEG
-        fileName?.endsWith(".jpeg", ignoreCase = true) == true -> PictureType.JPEG
-        fileName?.endsWith(".gif", ignoreCase = true) == true -> PictureType.GIF
-        else -> PictureType.PNG
+        // Nothing else: a file name can lie, and storing bytes under a format they are not
+        // would put a picture Word cannot render into the document.
+        else -> null
     }
 
     private fun ByteArray.hasSignature(vararg signature: Int): Boolean =
@@ -942,9 +944,11 @@ object WordDocument {
     private fun copyCellProperties(row: XWPFTableRow, index: Int) {
         if (index <= 0) return
         val properties = row.getCell(index - 1)?.getCTTc()?.getTcPr()?.copy() as? CTTcPr ?: return
-        // A copied span would merge the new cell into the column it was meant to extend.
-        properties.unsetGridSpan()
-        properties.unsetVMerge()
+        // A copied span would merge the new cell into the column it was meant to extend. Both
+        // checks are needed: unsetting an element that the copied properties do not carry
+        // throws out of XmlBeans on the detached copy.
+        if (properties.isSetGridSpan()) properties.unsetGridSpan()
+        if (properties.isSetVMerge()) properties.unsetVMerge()
         row.getCell(index)?.getCTTc()?.setTcPr(properties)
     }
 

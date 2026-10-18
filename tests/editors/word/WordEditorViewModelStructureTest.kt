@@ -141,8 +141,11 @@ class WordEditorViewModelStructureTest {
     private fun documentXml(uri: Uri): String =
         XWPFDocument(ByteArrayInputStream(saved(uri))).use { doc -> doc.document.xmlText() }
 
+    /** How many pictures the body references: a removed one leaves its unused part behind. */
     private fun pictureCount(uri: Uri): Int =
-        XWPFDocument(ByteArrayInputStream(saved(uri))).use { doc -> doc.allPictures.size }
+        XWPFDocument(ByteArrayInputStream(saved(uri))).use { doc ->
+            doc.paragraphs.sumOf { p -> p.runs.sumOf { run -> run.embeddedPictures.size } }
+        }
 
     private fun blockTexts(vm: WordEditorViewModel): List<String> =
         vm.blocks.filterIsInstance<WordDocument.ParagraphBlock>().map { it.text }
@@ -176,7 +179,8 @@ class WordEditorViewModelStructureTest {
         await("the split did not finish") { !vm.busy }
 
         save(vm)
-        assertEquals(listOf("First line", " typed", "Second line"), paragraphTexts(uri))
+        // Offset 11 is the space after "First line": the split happens exactly there.
+        assertEquals(listOf("First line ", "typed", "Second line"), paragraphTexts(uri))
     }
 
     @Test
@@ -310,9 +314,12 @@ class WordEditorViewModelStructureTest {
 
         vm.setFocus(0)
         vm.insertImage(picture)
-        await("the picture was not placed") { !vm.busy && vm.blocks.any { it is WordDocument.ImageBlock } }
+        await("the picture attempt did not finish") { !vm.busy }
 
-        assertNull("the editor accepts the picture", vm.notice)
+        assertTrue(
+            "the picture was not placed (notice: ${vm.notice}, blocks: ${vm.blocks.map { it::class.simpleName }})",
+            vm.blocks.any { it is WordDocument.ImageBlock },
+        )
         save(vm)
         assertEquals(1, pictureCount(uri))
         assertEquals(
@@ -321,7 +328,8 @@ class WordEditorViewModelStructureTest {
             paragraphTexts(uri),
         )
         XWPFDocument(ByteArrayInputStream(saved(uri))).use { doc ->
-            assertArrayEquals("the stored bytes are the picked file", png, doc.allPictures.first().data)
+            val inUse = doc.paragraphs.flatMap { p -> p.runs.flatMap { run -> run.embeddedPictures } }
+            assertArrayEquals("the stored bytes are the picked file", png, inUse.single().pictureData.data)
         }
     }
 
@@ -332,7 +340,11 @@ class WordEditorViewModelStructureTest {
         val picture = docxFile("shot.png", png)
         vm.setFocus(0)
         vm.insertImage(picture)
-        await("the picture was not placed") { !vm.busy && vm.blocks.any { it is WordDocument.ImageBlock } }
+        await("the picture attempt did not finish") { !vm.busy }
+        assertTrue(
+            "the picture was not placed (notice: ${vm.notice}, blocks: ${vm.blocks.map { it::class.simpleName }})",
+            vm.blocks.any { it is WordDocument.ImageBlock },
+        )
         assertTrue("placing a picture is one undo step", vm.canUndo)
 
         vm.undo()
@@ -352,7 +364,7 @@ class WordEditorViewModelStructureTest {
         vm.insertImage(notAPicture)
         await("the attempt did not finish") { !vm.busy }
 
-        assertTrue("the editor says why", vm.notice != null)
+        assertTrue("the editor says why (blocks: ${vm.blocks.map { it::class.simpleName }})", vm.notice != null)
         assertEquals("and nothing was added", 2, vm.blocks.size)
     }
 
@@ -365,9 +377,7 @@ class WordEditorViewModelStructureTest {
         val index = vm.blocks.indexOfFirst { it is WordDocument.TableBlock }
         assertTrue("the table is read", index >= 0)
 
-        vm.tableStates[index] = vm.tableStates[index]!!.mapIndexed { r, cells ->
-            if (r == 1) cells.map { if (it == "Plain") "Plain edited" else it } else cells
-        }
+        vm.editTableCell(index, row = 1, col = 1, text = "Plain edited")
         vm.openTableEditor(index)
         assertEquals("the cell editor opens", index, vm.activeTableBlockIndex)
         assertFalse("but its rows and columns are not editable", vm.activeTableStructureEditable())

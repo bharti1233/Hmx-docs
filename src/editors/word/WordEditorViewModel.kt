@@ -34,6 +34,10 @@ private const val EMU_PER_PIXEL = 9525
 /** The widest a picture is placed: 6.5 in, the text column of a letter page. */
 private const val MAX_IMAGE_WIDTH_EMU = 5_943_600
 
+/** The size a picture is placed at when its own pixel size cannot be read: 4 in x 3 in at 96 dpi. */
+private const val DEFAULT_PICTURE_WIDTH_PX = 384
+private const val DEFAULT_PICTURE_HEIGHT_PX = 288
+
 /**
  * Word editor state with full rich-text character formatting, paragraph/list styles,
  * interactive table mutations, find & replace, undo/redo history, and word counts.
@@ -742,20 +746,21 @@ class WordEditorViewModel(app: Application) : AndroidViewModel(app) {
                 }
             }
             prepared.onSuccess { picture ->
-                if (picture.bytes.isEmpty() || picture.widthPx <= 0 || picture.heightPx <= 0) {
-                    busy = false
-                    notice = "That file is not a picture this editor can place."
-                    return@onSuccess
-                }
+                // Whether the bytes are a picture this editor can store is decided from the
+                // bytes themselves, by the document model (a file name can lie). The bounds
+                // only decide how large it is drawn, so a picture whose own size cannot be
+                // read is still placed, at a default size rather than a zero-sized drawing.
+                val widthPx = picture.widthPx.takeIf { it > 0 } ?: DEFAULT_PICTURE_WIDTH_PX
+                val heightPx = picture.heightPx.takeIf { it > 0 } ?: DEFAULT_PICTURE_HEIGHT_PX
                 // Scaled down to the text column when it is wider, in proportion.
-                val scale = (MAX_IMAGE_WIDTH_EMU.toDouble() / (picture.widthPx * EMU_PER_PIXEL)).coerceAtMost(1.0)
+                val scale = (MAX_IMAGE_WIDTH_EMU.toDouble() / (widthPx * EMU_PER_PIXEL)).coerceAtMost(1.0)
                 runBlockOp(
                     WordDocument.BlockOp.InsertImage(
                         after = after,
                         bytes = picture.bytes,
                         fileName = picture.name,
-                        widthEmu = (picture.widthPx * EMU_PER_PIXEL * scale).toInt().coerceAtLeast(1),
-                        heightEmu = (picture.heightPx * EMU_PER_PIXEL * scale).toInt().coerceAtLeast(1),
+                        widthEmu = (widthPx * EMU_PER_PIXEL * scale).toInt().coerceAtLeast(1),
+                        heightEmu = (heightPx * EMU_PER_PIXEL * scale).toInt().coerceAtLeast(1),
                     ),
                     focusBlock = { (after + 1).coerceIn(0, it.size - 1) },
                     alreadyBusy = true,

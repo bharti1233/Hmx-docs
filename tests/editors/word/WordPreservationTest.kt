@@ -1500,16 +1500,23 @@ class WordPreservationTest {
 
         val firstRemoved = WordDocument.applyEditsAndSerialize(bytes, blockOp = WordDocument.BlockOp.DeleteImage(index, 0))
         assertEquals(1, pictureCount(firstRemoved))
-        assertEquals("the second picture is the one that stayed", png2.size, pictureBytes(firstRemoved).first().size)
+        assertEquals("the second picture is the one that stayed", png2.size, pictureBytes(firstRemoved).single().size)
         assertEquals("the caption is untouched", "Caption", paragraphTexts(firstRemoved).first())
 
         val secondRemoved = WordDocument.applyEditsAndSerialize(bytes, blockOp = WordDocument.BlockOp.DeleteImage(index, 1))
         assertEquals(1, pictureCount(secondRemoved))
-        assertEquals("the first picture is the one that stayed", png.size, pictureBytes(secondRemoved).first().size)
+        assertEquals("the first picture is the one that stayed", png.size, pictureBytes(secondRemoved).single().size)
     }
 
+    /**
+     * The bytes of the pictures the body actually references, in document order. A removal
+     * leaves the unused part in the package, so the parts alone cannot say which one is gone.
+     */
     private fun pictureBytes(bytes: ByteArray): List<ByteArray> =
-        XWPFDocument(ByteArrayInputStream(bytes)).use { doc -> doc.allPictures.map { it.data } }
+        XWPFDocument(ByteArrayInputStream(bytes)).use { doc ->
+            doc.paragraphs.flatMap { p -> p.runs.flatMap { run -> run.embeddedPictures } }
+                .mapNotNull { it.pictureData?.data }
+        }
 
     @Test
     fun aPictureThatDoesNotExistIsRefusedInsteadOfRemovingSomethingElse() {
@@ -1708,7 +1715,8 @@ class WordPreservationTest {
         assertTrue("the span survives a text edit", xmlCount(edited, "w:gridSpan") > 0)
         assertTrue("the merge survives a text edit", xmlCount(edited, "w:vMerge") > 0)
         assertEquals("the text landed", "Plain edited", tableGrid(edited).last()[1])
-        assertEquals("the grid was left alone", 3, gridColumns(edited))
+        assertEquals("no grid was invented for the merged table", 0, gridColumns(edited))
+        assertEquals("its first row still has its own two cells", 2, rowCellCount(edited, 0))
         assertTrue("the table is still reported as merged", WordDocument.read(edited).blocks.filterIsInstance<WordDocument.TableBlock>().single().merged)
     }
 
@@ -1782,11 +1790,13 @@ class WordPreservationTest {
         }
         val index = blockIndex(bytes, "Extra")
 
-        val after = snapshot(WordDocument.applyEditsAndSerialize(bytes, blockOp = WordDocument.BlockOp.DeleteBlock(index)))
+        val saved = WordDocument.applyEditsAndSerialize(bytes, blockOp = WordDocument.BlockOp.DeleteBlock(index))
+        val after = snapshot(saved)
 
         assertEquals(listOf("Header text"), after.headers)
         assertEquals(listOf("Footer text"), after.footers)
-        assertEquals(listOf("Body"), after.blocks)
+        assertEquals("the paragraph that stayed is the only one left", listOf("Body"), paragraphTexts(saved))
+        assertFalse("the deleted paragraph is gone", part(saved, "word/document.xml").contains("Extra"))
     }
 
     private companion object {

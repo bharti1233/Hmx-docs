@@ -157,8 +157,9 @@ retained" means the content is not modelled by the editor but is not rewritten e
 16. **Pictures** (`WordDocument.kt`, `WordEditorViewModel.kt`): a picture picked on the
     device is sniffed by magic bytes, stored as it is (never re-encoded) in a paragraph of
     its own at the caret, and scaled down to the 6.5 in text column when wider; a picture
-    can be removed by its ordinal inside the paragraph; a file that is not a picture this
-    editor can place is refused with a message.
+    can be removed by its ordinal inside the paragraph; a file whose *bytes* are not one of
+    those four formats is refused with a message - the file name is not trusted, so a
+    renamed text file cannot become a picture part Word cannot render.
 17. **Undo/redo over structural changes** (`WordEditorViewModel.kt`): a history snapshot
     carries the document bytes, the blocks, the paragraph fields, the properties and the
     table grids it belongs to, and `undo`/`redo` rebuild the pending writes from the
@@ -260,8 +261,12 @@ environment `[inference]`.
   after a split: the break is never duplicated, but the text that moved down belongs to
   the following section. Moving the break to the second half, and editing page setup in
   general, is not offered.
-- Only PNG, JPEG, GIF and BMP can be inserted (sniffed from the bytes). WebP and HEIC are
-  refused with a message rather than converted, and a picture is never re-encoded.
+- Only PNG, JPEG, GIF and BMP can be inserted, and which one it is comes from the bytes
+  alone (a file name cannot make bytes a picture). WebP and HEIC are refused with a message
+  rather than converted, and a picture is never re-encoded. The pixel size read from the
+  header decides how large the picture is drawn (scaled down to the 6.5 in column when
+  wider); on the rare file whose header Android cannot measure, it is drawn 4 in x 3 in
+  instead of at a zero size.
 - The file's bytes, not only the edits, are part of the history: up to four whole-document
   versions are kept in memory per open document (a fifth structural change drops the
   oldest). Text edits share their version, so ordinary typing does not multiply memory.
